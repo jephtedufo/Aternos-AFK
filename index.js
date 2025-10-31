@@ -396,36 +396,46 @@ async function goToChestAndGetSteak() {
 }
 
 async function checkHungerAndEat() {
-  if (!aiReady || !bot.entity || isGettingFood) return;
+  if (!aiReady || !bot.entity || isGettingFood || isPerformingAction) return;
   
   const food = bot.food || 20;
   const hungerThreshold = 14;
   
   if (food < hungerThreshold) {
-    let steakItem = findSteakInInventory();
+    console.log(`[AI] Hunger is low (${food}/20), looking for food`);
+    isPerformingAction = true;
     
-    if (!steakItem) {
-      await goToChestAndGetSteak();
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      steakItem = findSteakInInventory();
-    }
-    
-    if (steakItem) {
-      try {
-        await bot.equip(steakItem, 'hand');
-        await new Promise(resolve => setTimeout(resolve, 300));
+    try {
+      let steakItem = findSteakInInventory();
+      
+      if (!steakItem) {
+        console.log('[AI] No steak in inventory');
+        isPerformingAction = false;
+        await goToChestAndGetSteak();
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        steakItem = findSteakInInventory();
+        isPerformingAction = true;
+      }
+      
+      if (steakItem) {
+        console.log(`[AI] Found ${steakItem.name} in inventory, preparing to eat`);
         
-        console.log(`[AI] Hunger is low (${food}/20), eating ${steakItem.name}`);
+        await bot.equip(steakItem, 'hand');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        console.log(`[AI] Eating ${steakItem.name}...`);
         bot.activateItem();
         
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 2000));
         
-        console.log(`[AI] Finished eating, hunger now: ${bot.food}/20`);
-      } catch (error) {
-        console.log('[AI] Failed to eat:', error.message);
+        console.log(`[AI] Finished eating! Hunger now: ${bot.food}/20`);
+      } else {
+        console.log('[AI] Still no steak available after checking chest');
       }
-    } else {
-      console.log('[AI] Still no steak available after checking chest');
+    } catch (error) {
+      console.log('[AI] Failed to eat:', error.message);
+    } finally {
+      isPerformingAction = false;
     }
   }
 }
