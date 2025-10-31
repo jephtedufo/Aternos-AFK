@@ -279,6 +279,32 @@ async function checkForPlayers() {
   }
 }
 
+// Hunger and eating management
+async function checkHungerAndEat() {
+  if (!aiReady || !bot.entity) return;
+  
+  const food = bot.food || 20;
+  const hungerThreshold = 14;
+  
+  if (food < hungerThreshold) {
+    const heldItem = bot.heldItem;
+    
+    if (heldItem && (heldItem.name === 'cooked_beef' || heldItem.name === 'beef')) {
+      console.log(`[AI] Hunger is low (${food}/20), eating ${heldItem.name}`);
+      
+      try {
+        bot.activateItem();
+        
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        console.log(`[AI] Finished eating, hunger now: ${bot.food}/20`);
+      } catch (error) {
+        console.log('[AI] Failed to eat:', error.message);
+      }
+    }
+  }
+}
+
 // Main AI Loop
 function startAI() {
   randomSpeedChange();
@@ -296,6 +322,13 @@ function startAI() {
       checkForPlayers();
     }
   }, 5000 + Math.random() * 3000);
+  
+  // Hunger check every 3 seconds
+  setInterval(() => {
+    if (aiReady) {
+      checkHungerAndEat();
+    }
+  }, 3000);
   
   // Wander loop every 3-6 seconds
   setInterval(() => {
