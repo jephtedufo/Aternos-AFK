@@ -115,6 +115,54 @@ function randomSpeedChange() {
   setTimeout(() => randomSpeedChange(), duration);
 }
 
+// Random item holding
+async function randomlyHoldItem() {
+  if (!aiReady || isPerformingAction || isGettingFood) return;
+  
+  const items = bot.inventory.items();
+  if (items.length === 0) return;
+  
+  const randomItem = items[Math.floor(Math.random() * items.length)];
+  
+  try {
+    await bot.equip(randomItem, 'hand');
+    console.log(`[AI] Now holding ${randomItem.name}`);
+  } catch (error) {
+    // Silently fail if can't equip
+  }
+}
+
+// Random movements (crouch/jump)
+async function randomMovements() {
+  if (!aiReady || isPerformingAction) return;
+  
+  const rand = Math.random();
+  
+  if (rand < 0.3) {
+    // Crouch for a few seconds
+    const duration = 2000 + Math.random() * 3000;
+    console.log('[AI] Crouching...');
+    bot.setControlState('sneak', true);
+    
+    setTimeout(() => {
+      bot.setControlState('sneak', false);
+      console.log('[AI] Stopped crouching');
+    }, duration);
+    
+  } else if (rand < 0.6) {
+    // Jump a few times
+    const jumps = 2 + Math.floor(Math.random() * 3);
+    console.log(`[AI] Jumping ${jumps} times`);
+    
+    for (let i = 0; i < jumps; i++) {
+      bot.setControlState('jump', true);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      bot.setControlState('jump', false);
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+  }
+}
+
 // Scan for interactable objects
 function scanForInteractables() {
   if (!aiReady || !bot.entity || isPerformingAction) return null;
@@ -406,6 +454,20 @@ function startAI() {
       checkHungerAndEat();
     }
   }, 3000);
+  
+  // Random item holding every 10-20 seconds
+  setInterval(() => {
+    if (aiReady && Math.random() < 0.3) {
+      randomlyHoldItem();
+    }
+  }, 10000 + Math.random() * 10000);
+  
+  // Random movements (crouch/jump) every 8-15 seconds
+  setInterval(() => {
+    if (aiReady && Math.random() < 0.4) {
+      randomMovements();
+    }
+  }, 8000 + Math.random() * 7000);
   
   // Wander loop every 3-6 seconds
   setInterval(() => {
