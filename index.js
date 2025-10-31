@@ -216,10 +216,27 @@ function detectNearbyPlayers() {
   return players.length > 0 ? players : null;
 }
 
+function getNearestPlayer(players) {
+  if (!players || players.length === 0) return null;
+  
+  let nearest = players[0];
+  let minDistance = bot.entity.position.distanceTo(nearest.position);
+  
+  for (let i = 1; i < players.length; i++) {
+    const distance = bot.entity.position.distanceTo(players[i].position);
+    if (distance < minDistance) {
+      minDistance = distance;
+      nearest = players[i];
+    }
+  }
+  
+  return nearest;
+}
+
 async function followPlayer(player) {
   if (!player || !player.position) return;
   
-  console.log(`[AI] Following ${player.username}`);
+  console.log(`[AI] Following ${player.username} for 30 seconds`);
   isFollowingPlayer = true;
   followingPlayer = player;
   isMoving = false;
@@ -233,10 +250,9 @@ async function followPlayer(player) {
   bot.pathfinder.setGoal(new goals.GoalFollow(player, followDistance), true);
   
   setTimeout(() => {
-    if (Math.random() < 0.4) {
-      stopFollowing();
-    }
-  }, 8000 + Math.random() * 7000);
+    stopFollowing();
+    console.log('[AI] 30 seconds elapsed, returning to normal activity');
+  }, 30000);
 }
 
 function stopFollowing() {
@@ -256,8 +272,10 @@ async function checkForPlayers() {
   if (!players) return;
   
   if (Math.random() < 0.5) {
-    const player = players[Math.floor(Math.random() * players.length)];
-    await followPlayer(player);
+    const nearestPlayer = getNearestPlayer(players);
+    if (nearestPlayer) {
+      await followPlayer(nearestPlayer);
+    }
   }
 }
 
