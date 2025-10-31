@@ -60,37 +60,27 @@ To change chest location, edit `index.js`:
 - Current setup uses Node.js 20 (mineflayer recommends 22, but should work)
 
 ## Recent Changes
-- 2025-10-31: Improved chest interaction and movement
-  - Bot now walks instead of runs (sprint disabled)
-  - Properly right-clicks chest using activateBlock()
-  - Closes chest with ESC (closeWindow) after taking item
-  - Better logging to track chest visit progress
-  - More robust error handling for chest interactions
+- 2025-10-31: Production-ready deployment improvements
+  - **Auto-reconnection** with exponential backoff (5s → 60s max delay)
+  - **Robust error handling** for ECONNRESET, EPIPE, and network errors
+  - No more crashes on disconnect - bot automatically reconnects
+  - Fixed duplicate AI timers on reconnection (proper interval cleanup)
+  - Added graceful shutdown handlers (SIGINT/SIGTERM)
+  - Added version specification support in config.json
+  - Connection timeout settings (60s close timeout, 30s check interval)
+  - Created comprehensive bot description (DESCRIPTION.md)
 
-- 2025-10-31: Added automatic chest interaction system
-  - Bot visits chest at (2319, 77, 2975) at random intervals (30s-2min)
-  - Automatically opens chest, takes first item, and eats it
-  - Returns to normal wandering after chest interaction
-  - Handles errors gracefully if chest is empty or unreachable
-  - Uses async/await for smooth chest operations
+- 2025-10-31: Advanced AI behaviors
+  - **Player following** - detects and follows nearest player for 30 seconds
+  - **Smart hunger management** - checks inventory for food, visits chest if needed
+  - **Random item holding** - switches between inventory items naturally
+  - **Spontaneous movements** - random crouching and jumping while active
+  - Interacts with environment (doors, buttons, levers, chests)
+  - Upgraded to Node.js 22 for better compatibility
 
-- 2025-10-31: Implemented intelligent pathfinding with obstacle avoidance
-  - Integrated mineflayer-pathfinder for smart navigation
-  - Bot now detects and avoids walls automatically
-  - Explores freely instead of following fixed patterns
-  - Uses A* algorithm to find safe paths
-  - Automatically retries when paths are blocked
-  - Non-destructive exploration (doesn't break blocks)
-
-- 2025-10-31: Enhanced bot movement system
-  - Reduced movement interval from 2s to 0.8s (much more active)
-  - Added jumping functionality (40% chance while moving)
-  - Added sprinting capability (30% chance)
-  - Bot now moves more naturally with varied paths and actions
-  
-- 2025-10-31: Initial Replit environment setup
-  - Fixed keep_alive.js to properly export function
-  - Updated Express server to use port 5000 and bind to 0.0.0.0
-  - Added .gitignore for Node.js
-  - Installed all dependencies
-  - Configured workflow for automatic startup
+- 2025-10-31: Core AI and navigation
+  - Intelligent pathfinding with obstacle avoidance
+  - Wanders within 30 blocks of spawn with varied movement patterns
+  - Natural walking/sprinting behavior with random pauses
+  - A* algorithm for safe pathfinding around obstacles
+  - Non-destructive exploration

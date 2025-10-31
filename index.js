@@ -9,15 +9,6 @@ keep_alive();
 let rawdata = fs.readFileSync('config.json');
 let data = JSON.parse(rawdata);
 
-var host = data["ip"];
-var username = data["name"]
-var bot = mineflayer.createBot({
-  host: host,
-  username: username
-});
-
-bot.loadPlugin(pathfinder);
-
 // Core State Variables
 var spawnPoint = null;
 var connected = false;
@@ -29,31 +20,35 @@ var isFollowingPlayer = false;
 var currentSpeed = 'walk';
 var aiReady = false;
 
-bot.on('login', function(){
-  console.log("Logged In")
-});
+// Reconnection variables
+let reconnectAttempts = 0;
+const maxReconnectDelay = 60000; // 1 minute max
+let bot;
 
-bot.on('spawn', function() {
-  console.log("Bot spawned!");
-  connected = true;
-  aiReady = false;
+// AI Loop interval IDs to prevent duplicates
+let aiIntervals = [];
+let aiStarted = false;
+
+function createBot() {
+  const config = {
+    host: data["ip"],
+    port: data["port"] ? parseInt(data["port"]) : undefined,
+    username: data["name"],
+    version: data["version"] || false,
+    closeTimeout: 60000,
+    checkTimeoutInterval: 30000
+  };
+
+  console.log(`[Bot] Connecting to ${config.host}${config.port ? ':' + config.port : ''}...`);
   
-  setTimeout(() => {
-    if (bot.entity && bot.entity.position) {
-      spawnPoint = bot.entity.position.clone();
-      console.log(`\n${"=".repeat(50)}`);
-      console.log(`M3GAN AI System Initializing...`);
-      console.log(`Spawn: X=${spawnPoint.x.toFixed(1)}, Y=${spawnPoint.y.toFixed(1)}, Z=${spawnPoint.z.toFixed(1)}`);
-      console.log("=".repeat(50));
-      
-      setTimeout(() => {
-        aiReady = true;
-        console.log("[AI] M3GAN is now active\n");
-        startAI();
-      }, 3000);
-    }
-  }, 2000);
-});
+  bot = mineflayer.createBot(config);
+  bot.loadPlugin(pathfinder);
+  
+  return bot;
+}
+
+bot = createBot();
+setupEventHandlers();
 
 // ==================== CORE AI FUNCTIONS ====================
 
@@ -440,85 +435,161 @@ async function checkHungerAndEat() {
   }
 }
 
+// Clear all AI intervals
+function clearAIIntervals() {
+  aiIntervals.forEach(intervalId => clearInterval(intervalId));
+  aiIntervals = [];
+  aiStarted = false;
+}
+
 // Main AI Loop
 function startAI() {
+  // Prevent duplicate AI loops
+  if (aiStarted) {
+    console.log('[AI] AI loop already running, skipping duplicate start');
+    return;
+  }
+  
+  aiStarted = true;
   randomSpeedChange();
   
   // Environment check every 8-12 seconds
-  setInterval(() => {
+  aiIntervals.push(setInterval(() => {
     if (aiReady && Math.random() < 0.2) {
       checkEnvironment();
     }
-  }, 8000 + Math.random() * 4000);
+  }, 8000 + Math.random() * 4000));
   
   // Player check every 5-8 seconds
-  setInterval(() => {
+  aiIntervals.push(setInterval(() => {
     if (aiReady && Math.random() < 0.4) {
       checkForPlayers();
     }
-  }, 5000 + Math.random() * 3000);
+  }, 5000 + Math.random() * 3000));
   
   // Hunger check every 3 seconds
-  setInterval(() => {
+  aiIntervals.push(setInterval(() => {
     if (aiReady) {
       checkHungerAndEat();
     }
-  }, 3000);
+  }, 3000));
   
   // Random item holding every 10-20 seconds
-  setInterval(() => {
+  aiIntervals.push(setInterval(() => {
     if (aiReady && Math.random() < 0.3) {
       randomlyHoldItem();
     }
-  }, 10000 + Math.random() * 10000);
+  }, 10000 + Math.random() * 10000));
   
   // Random movements (crouch/jump) every 8-15 seconds
-  setInterval(() => {
+  aiIntervals.push(setInterval(() => {
     if (aiReady && Math.random() < 0.4) {
       randomMovements();
     }
-  }, 8000 + Math.random() * 7000);
+  }, 8000 + Math.random() * 7000));
   
   // Wander loop every 3-6 seconds
-  setInterval(() => {
+  aiIntervals.push(setInterval(() => {
     if (aiReady && !isMoving && !isPerformingAction && !isFollowingPlayer) {
       startWandering();
     }
-  }, 3000 + Math.random() * 3000);
+  }, 3000 + Math.random() * 3000));
   
   setTimeout(() => startWandering(), 2000);
 }
 
-// Event Handlers
-bot.on('goal_reached', function() {
-  if (isFollowingPlayer) return;
-  console.log('[Move] Reached destination');
-  isMoving = false;
-});
-
-bot.on('path_update', function(results) {
-  if (isFollowingPlayer) return;
-  
-  if (results.status === 'noPath') {
-    isMoving = false;
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('[Bot] Shutting down gracefully...');
+  if (bot) {
+    bot.quit();
   }
+  process.exit(0);
 });
 
-bot.on('end', function() {
-  console.log('Disconnected');
-  connected = false;
-  aiReady = false;
-  isMoving = false;
-  isPerformingAction = false;
-  isFollowingPlayer = false;
+process.on('SIGTERM', () => {
+  console.log('[Bot] Shutting down gracefully...');
+  if (bot) {
+    bot.quit();
+  }
+  process.exit(0);
 });
 
-bot.on('kicked', function(reason) {
-  console.log('Kicked:', reason);
-  connected = false;
-  aiReady = false;
-});
+function setupEventHandlers() {
+  bot.on('login', function(){
+    console.log("Logged In")
+  });
 
-bot.on('error', function(err) {
-  console.log('Error:', err.message);
-});
+  bot.on('spawn', function() {
+    console.log("Bot spawned!");
+    connected = true;
+    aiReady = false;
+    reconnectAttempts = 0;
+    
+    setTimeout(() => {
+      if (bot.entity && bot.entity.position) {
+        spawnPoint = bot.entity.position.clone();
+        console.log(`\n${"=".repeat(50)}`);
+        console.log(`M3GAN AI System Initializing...`);
+        console.log(`Spawn: X=${spawnPoint.x.toFixed(1)}, Y=${spawnPoint.y.toFixed(1)}, Z=${spawnPoint.z.toFixed(1)}`);
+        console.log("=".repeat(50));
+        
+        setTimeout(() => {
+          aiReady = true;
+          console.log("[AI] M3GAN is now active\n");
+          startAI();
+        }, 3000);
+      }
+    }, 2000);
+  });
+
+  bot.on('goal_reached', function() {
+    if (isFollowingPlayer) return;
+    console.log('[Move] Reached destination');
+    isMoving = false;
+  });
+
+  bot.on('path_update', function(results) {
+    if (isFollowingPlayer) return;
+    
+    if (results.status === 'noPath') {
+      isMoving = false;
+    }
+  });
+
+  bot.on('end', function() {
+    console.log('[Bot] Disconnected from server');
+    connected = false;
+    aiReady = false;
+    isMoving = false;
+    isPerformingAction = false;
+    isFollowingPlayer = false;
+    
+    // Clear all AI intervals to prevent duplicates on reconnect
+    clearAIIntervals();
+    
+    // Auto-reconnect with exponential backoff
+    reconnectAttempts++;
+    const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), maxReconnectDelay);
+    console.log(`[Bot] Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})...`);
+    
+    setTimeout(() => {
+      bot = createBot();
+      setupEventHandlers();
+    }, delay);
+  });
+
+  bot.on('kicked', function(reason) {
+    console.log('[Bot] Kicked from server:', reason);
+    connected = false;
+    aiReady = false;
+  });
+
+  bot.on('error', function(err) {
+    console.error(`[Bot] Error occurred:`, {
+      code: err.code,
+      message: err.message,
+      syscall: err.syscall
+    });
+  });
+}
