@@ -40,6 +40,7 @@ function createBot() {
   };
 
   console.log(`[Bot] Connecting to ${config.host}${config.port ? ':' + config.port : ''}...`);
+  console.log(`[Bot] Note: If using Aternos, make sure the server is online first!`);
   
   bot = mineflayer.createBot(config);
   bot.loadPlugin(pathfinder);
@@ -591,5 +592,33 @@ function setupEventHandlers() {
       message: err.message,
       syscall: err.syscall
     });
+    
+    // Handle connection errors (ECONNRESET, ECONNREFUSED, etc.)
+    if (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+      console.log(`[Bot] Connection error detected. The server might be offline.`);
+      
+      // Don't trigger reconnect immediately if already disconnected
+      if (!connected) {
+        console.log(`[Bot] Already disconnected, waiting for 'end' event to trigger reconnect...`);
+        return;
+      }
+      
+      // Manually trigger disconnect handling
+      connected = false;
+      aiReady = false;
+      isMoving = false;
+      isPerformingAction = false;
+      isFollowingPlayer = false;
+      clearAIIntervals();
+      
+      // Try to disconnect gracefully
+      if (bot) {
+        try {
+          bot.quit();
+        } catch (e) {
+          // Ignore quit errors
+        }
+      }
+    }
   });
 }
