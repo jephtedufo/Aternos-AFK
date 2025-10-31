@@ -27,6 +27,13 @@ var isDoingChestTask = false;
 var shouldSprint = false; // Track if bot should be sprinting
 var wallCheckInterval = null; // Interval for checking nearby walls
 
+// AI Behavior System
+var behaviorInterval = null;
+var currentMood = 'neutral'; // curious, cautious, energetic, calm, neutral
+var isPerformingBehavior = false;
+var lastBehaviorTime = Date.now();
+var decisionTimer = null;
+
 // Chest configuration
 const chestPosition = new Vec3(2319, 77, 2975);
 const standingPosition = new Vec3(2319, 77, 2976);
@@ -45,6 +52,10 @@ bot.on('spawn', function() {
       console.log(`Spawn point: X=${spawnPoint.x.toFixed(2)}, Y=${spawnPoint.y.toFixed(2)}, Z=${spawnPoint.z.toFixed(2)}`);
       console.log("Starting intelligent exploration with obstacle avoidance...");
       console.log("Bot will walk and occasionally run, staying away from walls");
+      console.log("=".repeat(50));
+      
+      // Start AI behavior system
+      startAIBehaviors();
       
       // Start wandering
       startWandering();
@@ -235,6 +246,287 @@ async function visitChest() {
   }
 }
 
+// ==================== AI BEHAVIOR SYSTEM ====================
+
+// Randomly change mood/personality state
+function changeMood() {
+  const moods = ['curious', 'cautious', 'energetic', 'calm', 'neutral'];
+  const oldMood = currentMood;
+  currentMood = moods[Math.floor(Math.random() * moods.length)];
+  
+  if (oldMood !== currentMood) {
+    console.log(`[AI] M3GAN's mood changed: ${oldMood} → ${currentMood}`);
+  }
+}
+
+// Look around naturally like a human
+async function lookAround() {
+  if (!bot.entity || isDoingChestTask) return;
+  
+  console.log('[AI] Looking around...');
+  
+  const lookDirections = [
+    { pitch: 0, yaw: Math.random() * Math.PI * 2 }, // Horizontal look
+    { pitch: -0.3, yaw: Math.random() * Math.PI * 2 }, // Look up slightly
+    { pitch: 0.3, yaw: Math.random() * Math.PI * 2 }, // Look down slightly
+  ];
+  
+  for (let i = 0; i < 3; i++) {
+    const dir = lookDirections[Math.floor(Math.random() * lookDirections.length)];
+    await bot.look(dir.yaw, dir.pitch);
+    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+  }
+}
+
+// Stop and idle for a moment
+async function pauseAndThink() {
+  if (isDoingChestTask) return;
+  
+  console.log('[AI] Pausing to think...');
+  isPerformingBehavior = true;
+  
+  // Stop current movement
+  bot.pathfinder.setGoal(null);
+  bot.clearControlStates();
+  
+  // Stand still and look around
+  await lookAround();
+  
+  // Random pause duration (2-5 seconds)
+  const pauseDuration = 2000 + Math.random() * 3000;
+  await new Promise(resolve => setTimeout(resolve, pauseDuration));
+  
+  isPerformingBehavior = false;
+  console.log('[AI] Resuming activity');
+}
+
+// Random jumping behavior
+async function doRandomJump() {
+  if (!bot.entity || isDoingChestTask) return;
+  
+  const jumpType = Math.random();
+  
+  if (jumpType < 0.5) {
+    // Single jump
+    console.log('[AI] Jumping once');
+    bot.setControlState('jump', true);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    bot.setControlState('jump', false);
+  } else {
+    // Double jump (excited behavior)
+    console.log('[AI] Double jump!');
+    for (let i = 0; i < 2; i++) {
+      bot.setControlState('jump', true);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      bot.setControlState('jump', false);
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+  }
+}
+
+// Crouch behavior (sneaking)
+async function crouchBehavior() {
+  if (isDoingChestTask) return;
+  
+  console.log('[AI] Crouching...');
+  bot.setControlState('sneak', true);
+  
+  // Crouch for 2-4 seconds
+  const crouchDuration = 2000 + Math.random() * 2000;
+  await new Promise(resolve => setTimeout(resolve, crouchDuration));
+  
+  bot.setControlState('sneak', false);
+  console.log('[AI] Standing back up');
+}
+
+// Investigate nearby interesting blocks
+async function investigateEnvironment() {
+  if (!bot.entity || isDoingChestTask) return;
+  
+  console.log('[AI] Investigating environment...');
+  isPerformingBehavior = true;
+  
+  const pos = bot.entity.position;
+  const radius = 5;
+  
+  // Find interesting blocks nearby
+  const interestingBlocks = ['chest', 'crafting_table', 'furnace', 'diamond_ore', 'gold_ore', 'iron_ore'];
+  
+  for (let x = -radius; x <= radius; x++) {
+    for (let y = -2; y <= 2; y++) {
+      for (let z = -radius; z <= radius; z++) {
+        const block = bot.blockAt(pos.offset(x, y, z));
+        if (block && interestingBlocks.includes(block.name)) {
+          console.log(`[AI] Found interesting block: ${block.name}`);
+          await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          break;
+        }
+      }
+    }
+  }
+  
+  isPerformingBehavior = false;
+}
+
+// Check out nearby entities/players
+async function observeNearbyEntities() {
+  if (!bot.entity || isDoingChestTask) return;
+  
+  const entities = Object.values(bot.entities).filter(e => 
+    e !== bot.entity && 
+    e.position && 
+    e.position.distanceTo(bot.entity.position) < 15
+  );
+  
+  if (entities.length > 0) {
+    const entity = entities[Math.floor(Math.random() * entities.length)];
+    console.log(`[AI] Observing nearby entity: ${entity.name || entity.type}`);
+    
+    isPerformingBehavior = true;
+    
+    // Look at the entity
+    await bot.lookAt(entity.position.offset(0, entity.height || 1, 0));
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Maybe approach it
+    if (Math.random() < 0.3 && currentMood === 'curious') {
+      console.log('[AI] Approaching entity...');
+      const movements = new Movements(bot);
+      movements.canDig = false;
+      movements.sprint = false;
+      bot.pathfinder.setMovements(movements);
+      bot.pathfinder.setGoal(new goals.GoalNear(entity.position.x, entity.position.y, entity.position.z, 3));
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      bot.pathfinder.setGoal(null);
+    }
+    
+    isPerformingBehavior = false;
+  }
+}
+
+// Randomly change direction mid-path (indecisive behavior)
+function changeMyMind() {
+  if (isDoingChestTask || !isMoving) return;
+  
+  console.log('[AI] Changed my mind! Picking new destination');
+  bot.pathfinder.setGoal(null);
+  isMoving = false;
+  
+  // Pick new destination after brief pause
+  setTimeout(() => {
+    if (!isDoingChestTask && !isPerformingBehavior) {
+      startWandering();
+    }
+  }, 1000 + Math.random() * 2000);
+}
+
+// Main AI behavior decision maker
+async function makeAIDecision() {
+  if (!connected || isDoingChestTask || isPerformingBehavior) return;
+  
+  // Randomly change mood occasionally
+  if (Math.random() < 0.05) {
+    changeMood();
+  }
+  
+  const behaviors = [];
+  
+  // Build weighted behavior list based on mood
+  switch(currentMood) {
+    case 'curious':
+      behaviors.push(
+        { action: investigateEnvironment, weight: 25 },
+        { action: observeNearbyEntities, weight: 25 },
+        { action: lookAround, weight: 20 },
+        { action: doRandomJump, weight: 15 },
+        { action: changeMyMind, weight: 15 }
+      );
+      break;
+      
+    case 'cautious':
+      behaviors.push(
+        { action: lookAround, weight: 30 },
+        { action: pauseAndThink, weight: 25 },
+        { action: crouchBehavior, weight: 20 },
+        { action: observeNearbyEntities, weight: 15 },
+        { action: changeMyMind, weight: 10 }
+      );
+      break;
+      
+    case 'energetic':
+      behaviors.push(
+        { action: doRandomJump, weight: 30 },
+        { action: changeMyMind, weight: 25 },
+        { action: () => { shouldSprint = true; }, weight: 20 },
+        { action: lookAround, weight: 15 },
+        { action: observeNearbyEntities, weight: 10 }
+      );
+      break;
+      
+    case 'calm':
+      behaviors.push(
+        { action: pauseAndThink, weight: 30 },
+        { action: lookAround, weight: 25 },
+        { action: investigateEnvironment, weight: 20 },
+        { action: crouchBehavior, weight: 15 },
+        { action: observeNearbyEntities, weight: 10 }
+      );
+      break;
+      
+    default: // neutral
+      behaviors.push(
+        { action: lookAround, weight: 20 },
+        { action: pauseAndThink, weight: 15 },
+        { action: doRandomJump, weight: 15 },
+        { action: investigateEnvironment, weight: 15 },
+        { action: observeNearbyEntities, weight: 15 },
+        { action: changeMyMind, weight: 10 },
+        { action: crouchBehavior, weight: 10 }
+      );
+  }
+  
+  // Select behavior based on weights
+  const totalWeight = behaviors.reduce((sum, b) => sum + b.weight, 0);
+  let random = Math.random() * totalWeight;
+  
+  for (const behavior of behaviors) {
+    random -= behavior.weight;
+    if (random <= 0) {
+      try {
+        await behavior.action();
+      } catch (error) {
+        console.log('[AI] Behavior error:', error.message);
+      }
+      break;
+    }
+  }
+  
+  lastBehaviorTime = Date.now();
+}
+
+// Start AI behavior system
+function startAIBehaviors() {
+  console.log('[AI] M3GAN AI system activated');
+  
+  // Random behaviors every 8-20 seconds
+  behaviorInterval = setInterval(() => {
+    if (connected && !isDoingChestTask && !isPerformingBehavior) {
+      // Random chance to perform a behavior (40% each check)
+      if (Math.random() < 0.4) {
+        makeAIDecision();
+      }
+    }
+  }, 8000 + Math.random() * 12000);
+  
+  // Mood changes every 30-60 seconds
+  setInterval(() => {
+    if (connected) {
+      changeMood();
+    }
+  }, 30000 + Math.random() * 30000);
+}
+
 // Check for nearby walls and obstacles
 function checkNearbyWalls() {
   if (!bot.entity || !bot.entity.position) return false;
@@ -382,9 +674,20 @@ bot.on('end', function() {
   isMoving = false;
   isDoingChestTask = false;
   shouldSprint = false;
+  isPerformingBehavior = false;
+  
+  // Clean up all intervals
   if (wallCheckInterval) {
     clearInterval(wallCheckInterval);
     wallCheckInterval = null;
+  }
+  if (behaviorInterval) {
+    clearInterval(behaviorInterval);
+    behaviorInterval = null;
+  }
+  if (decisionTimer) {
+    clearTimeout(decisionTimer);
+    decisionTimer = null;
   }
 });
 
@@ -394,9 +697,20 @@ bot.on('kicked', function(reason) {
   isMoving = false;
   isDoingChestTask = false;
   shouldSprint = false;
+  isPerformingBehavior = false;
+  
+  // Clean up all intervals
   if (wallCheckInterval) {
     clearInterval(wallCheckInterval);
     wallCheckInterval = null;
+  }
+  if (behaviorInterval) {
+    clearInterval(behaviorInterval);
+    behaviorInterval = null;
+  }
+  if (decisionTimer) {
+    clearTimeout(decisionTimer);
+    decisionTimer = null;
   }
 });
 
