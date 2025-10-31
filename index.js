@@ -24,6 +24,8 @@ var connected = false;
 var isMoving = false;
 var maxDistance = 30; // Maximum distance to wander from spawn
 var isDoingChestTask = false;
+var shouldSprint = false; // Track if bot should be sprinting
+var wallCheckInterval = null; // Interval for checking nearby walls
 
 // Chest configuration
 const chestPosition = new Vec3(2319, 77, 2975);
@@ -42,7 +44,7 @@ bot.on('spawn', function() {
       spawnPoint = bot.entity.position.clone();
       console.log(`Spawn point: X=${spawnPoint.x.toFixed(2)}, Y=${spawnPoint.y.toFixed(2)}, Z=${spawnPoint.z.toFixed(2)}`);
       console.log("Starting intelligent exploration with obstacle avoidance...");
-      console.log("Bot will WALK (not run) and visit chest periodically");
+      console.log("Bot will walk and occasionally run, staying away from walls");
       
       // Start wandering
       startWandering();
@@ -233,6 +235,53 @@ async function visitChest() {
   }
 }
 
+// Check for nearby walls and obstacles
+function checkNearbyWalls() {
+  if (!bot.entity || !bot.entity.position) return false;
+  
+  const pos = bot.entity.position;
+  const minDistance = 1.5; // Stay at least 1.5 blocks away from walls
+  
+  // Check in 8 directions around the bot
+  const directions = [
+    new Vec3(1, 0, 0),   // East
+    new Vec3(-1, 0, 0),  // West
+    new Vec3(0, 0, 1),   // South
+    new Vec3(0, 0, -1),  // North
+    new Vec3(1, 0, 1),   // Southeast
+    new Vec3(-1, 0, 1),  // Southwest
+    new Vec3(1, 0, -1),  // Northeast
+    new Vec3(-1, 0, -1)  // Northwest
+  ];
+  
+  for (const dir of directions) {
+    const checkPos = pos.offset(dir.x * minDistance, 0, dir.z * minDistance);
+    const block = bot.blockAt(checkPos);
+    
+    // If there's a solid block nearby, move away from it
+    if (block && block.boundingBox === 'block') {
+      // Move in opposite direction
+      const awayDir = dir.scaled(-1);
+      const newGoal = pos.offset(awayDir.x * 2, 0, awayDir.z * 2);
+      
+      console.log(`Wall detected! Moving away from obstacle at ${checkPos}`);
+      
+      const movements = new Movements(bot);
+      movements.canDig = false;
+      movements.allow1by1towers = false;
+      movements.scafoldingBlocks = [];
+      movements.sprint = shouldSprint;
+      
+      bot.pathfinder.setMovements(movements);
+      bot.pathfinder.setGoal(new goals.GoalNear(newGoal.x, newGoal.y, newGoal.z, 1));
+      
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 function getRandomWalkablePosition() {
   if (!spawnPoint) return null;
   
@@ -250,19 +299,34 @@ function startWandering() {
   const targetPos = getRandomWalkablePosition();
   if (!targetPos) return;
   
-  console.log(`Walking to: X=${targetPos.x.toFixed(2)}, Z=${targetPos.z.toFixed(2)}`);
+  // Randomly decide if bot should sprint (30% chance)
+  shouldSprint = Math.random() < 0.3;
+  
+  const movementType = shouldSprint ? "Running" : "Walking";
+  console.log(`${movementType} to: X=${targetPos.x.toFixed(2)}, Z=${targetPos.z.toFixed(2)}`);
   
   // Configure movement settings
   const defaultMove = new Movements(bot);
   defaultMove.canDig = false; // Don't break blocks
   defaultMove.allow1by1towers = false; // Don't build towers
   defaultMove.scafoldingBlocks = []; // Don't place blocks
-  defaultMove.sprint = false; // WALK, don't run!
+  defaultMove.sprint = shouldSprint; // Sprint randomly
   
   bot.pathfinder.setMovements(defaultMove);
   bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 2));
   
   isMoving = true;
+  
+  // Start checking for walls while moving
+  if (wallCheckInterval) {
+    clearInterval(wallCheckInterval);
+  }
+  
+  wallCheckInterval = setInterval(() => {
+    if (isMoving && !isDoingChestTask) {
+      checkNearbyWalls();
+    }
+  }, 1000); // Check every second
 }
 
 // When bot reaches destination, pick a new one
@@ -317,6 +381,11 @@ bot.on('end', function() {
   connected = false;
   isMoving = false;
   isDoingChestTask = false;
+  shouldSprint = false;
+  if (wallCheckInterval) {
+    clearInterval(wallCheckInterval);
+    wallCheckInterval = null;
+  }
 });
 
 bot.on('kicked', function(reason) {
@@ -324,6 +393,11 @@ bot.on('kicked', function(reason) {
   connected = false;
   isMoving = false;
   isDoingChestTask = false;
+  shouldSprint = false;
+  if (wallCheckInterval) {
+    clearInterval(wallCheckInterval);
+    wallCheckInterval = null;
+  }
 });
 
 bot.on('error', function(err) {
