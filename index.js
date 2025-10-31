@@ -280,19 +280,94 @@ async function checkForPlayers() {
 }
 
 // Hunger and eating management
+var isGettingFood = false;
+const foodChestLocation = new Vec3(2319, 77, 2975);
+
+function findSteakInInventory() {
+  const items = bot.inventory.items();
+  return items.find(item => item.name === 'cooked_beef' || item.name === 'beef');
+}
+
+async function goToChestAndGetSteak() {
+  if (isGettingFood || isPerformingAction) return;
+  
+  console.log('[AI] No steak in inventory, going to chest to get food');
+  isGettingFood = true;
+  isPerformingAction = true;
+  
+  try {
+    bot.pathfinder.setGoal(null);
+    isMoving = false;
+    
+    const movements = new Movements(bot);
+    movements.canDig = false;
+    movements.sprint = false;
+    
+    bot.pathfinder.setMovements(movements);
+    bot.pathfinder.setGoal(new goals.GoalNear(foodChestLocation.x, foodChestLocation.y, foodChestLocation.z, 2));
+    
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    bot.pathfinder.setGoal(null);
+    
+    const chestBlock = bot.blockAt(foodChestLocation);
+    if (!chestBlock || chestBlock.name !== 'chest') {
+      console.log('[AI] Could not find chest at expected location');
+      isGettingFood = false;
+      isPerformingAction = false;
+      return;
+    }
+    
+    console.log('[AI] Opening chest to get steak');
+    await bot.lookAt(chestBlock.position.offset(0.5, 0.5, 0.5));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    const window = await bot.openContainer(chestBlock);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    const steakInChest = window.containerItems().find(item => 
+      item.name === 'cooked_beef' || item.name === 'beef'
+    );
+    
+    if (steakInChest) {
+      console.log(`[AI] Found ${steakInChest.name} in chest, taking it`);
+      await window.withdraw(steakInChest.type, null, steakInChest.count);
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } else {
+      console.log('[AI] No steak found in chest');
+    }
+    
+    bot.closeWindow(window);
+    console.log('[AI] Closed chest');
+    
+  } catch (error) {
+    console.log('[AI] Failed to get food from chest:', error.message);
+  } finally {
+    isGettingFood = false;
+    isPerformingAction = false;
+  }
+}
+
 async function checkHungerAndEat() {
-  if (!aiReady || !bot.entity) return;
+  if (!aiReady || !bot.entity || isGettingFood) return;
   
   const food = bot.food || 20;
   const hungerThreshold = 14;
   
   if (food < hungerThreshold) {
-    const heldItem = bot.heldItem;
+    let steakItem = findSteakInInventory();
     
-    if (heldItem && (heldItem.name === 'cooked_beef' || heldItem.name === 'beef')) {
-      console.log(`[AI] Hunger is low (${food}/20), eating ${heldItem.name}`);
-      
+    if (!steakItem) {
+      await goToChestAndGetSteak();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      steakItem = findSteakInInventory();
+    }
+    
+    if (steakItem) {
       try {
+        await bot.equip(steakItem, 'hand');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        console.log(`[AI] Hunger is low (${food}/20), eating ${steakItem.name}`);
         bot.activateItem();
         
         await new Promise(resolve => setTimeout(resolve, 1500));
@@ -301,6 +376,8 @@ async function checkHungerAndEat() {
       } catch (error) {
         console.log('[AI] Failed to eat:', error.message);
       }
+    } else {
+      console.log('[AI] Still no steak available after checking chest');
     }
   }
 }
