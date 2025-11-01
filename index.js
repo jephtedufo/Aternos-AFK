@@ -19,6 +19,7 @@ var followingPlayer = null;
 var isFollowingPlayer = false;
 var currentSpeed = 'walk';
 var aiReady = false;
+var isGettingFood = false; // Moved here to fix hoisting issue
 
 // Reconnection variables
 let reconnectAttempts = 0;
@@ -34,6 +35,9 @@ let aiStarted = false;
 
 // Keep-alive interval
 let keepAliveInterval = null;
+
+// Speed change timeout to prevent memory leaks
+let speedChangeTimeout = null;
 
 function createBot() {
   const config = {
@@ -98,26 +102,33 @@ function getSmartWanderPosition() {
 
 function startWandering() {
   if (!aiReady || !connected || isMoving || isPerformingAction || isFollowingPlayer) return;
+  if (!bot || !bot.pathfinder) return; // Safety check
   
   const targetPos = getSmartWanderPosition();
   if (!targetPos) return;
   
   const shouldSprint = (currentSpeed === 'sprint');
-  const movements = new Movements(bot);
-  movements.canDig = false;
-  movements.allow1by1towers = false;
-  movements.scafoldingBlocks = [];
-  movements.sprint = shouldSprint;
   
-  bot.pathfinder.setMovements(movements);
-  bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 1));
-  
-  isMoving = true;
-  console.log(`[Move] ${shouldSprint ? 'Running' : 'Walking'} to X=${targetPos.x}, Z=${targetPos.z}`);
+  try {
+    const movements = new Movements(bot);
+    movements.canDig = false;
+    movements.allow1by1towers = false;
+    movements.scafoldingBlocks = [];
+    movements.sprint = shouldSprint;
+    
+    bot.pathfinder.setMovements(movements);
+    bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 1));
+    
+    isMoving = true;
+    console.log(`[Move] ${shouldSprint ? 'Running' : 'Walking'} to X=${targetPos.x}, Z=${targetPos.z}`);
+  } catch (error) {
+    // Silently handle pathfinding errors
+    isMoving = false;
+  }
 }
 
 function randomSpeedChange() {
-  if (!aiReady) return;
+  if (!aiReady || !connected) return;
   
   const rand = Math.random();
   
@@ -127,7 +138,7 @@ function randomSpeedChange() {
     currentSpeed = 'sprint';
   } else {
     currentSpeed = 'pause';
-    if (isMoving) {
+    if (isMoving && bot && bot.pathfinder) {
       bot.pathfinder.setGoal(null);
       isMoving = false;
       console.log('[AI] Pausing...');
@@ -138,7 +149,11 @@ function randomSpeedChange() {
                    currentSpeed === 'pause' ? 2000 + Math.random() * 2000 :
                    8000 + Math.random() * 7000;
   
-  setTimeout(() => randomSpeedChange(), duration);
+  // Clear any existing timeout and store the new one to prevent memory leaks
+  if (speedChangeTimeout) {
+    clearTimeout(speedChangeTimeout);
+  }
+  speedChangeTimeout = setTimeout(() => randomSpeedChange(), duration);
 }
 
 // Random item holding
@@ -219,14 +234,15 @@ function scanForInteractables() {
 }
 
 async function interactWithObject(block) {
-  if (!block) return;
+  if (!block || !bot || !bot.pathfinder) return;
   
   console.log(`[AI] Interacting with ${block.name}`);
   isPerformingAction = true;
   isMoving = false;
-  bot.pathfinder.setGoal(null);
   
   try {
+    bot.pathfinder.setGoal(null);
+    
     const movements = new Movements(bot);
     movements.canDig = false;
     movements.sprint = false;
@@ -255,7 +271,7 @@ async function interactWithObject(block) {
     
     console.log('[AI] Interaction complete');
   } catch (error) {
-    console.log('[AI] Interaction failed');
+    console.log('[AI] Interaction failed:', error.message);
   } finally {
     isPerformingAction = false;
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -309,30 +325,43 @@ function getNearestPlayer(players) {
 
 async function followPlayer(player) {
   if (!player || !player.position) return;
+  if (!bot || !bot.pathfinder) return; // Safety check
   
   console.log(`[AI] Following ${player.username} for 30 seconds`);
   isFollowingPlayer = true;
   followingPlayer = player;
   isMoving = false;
   
-  const followDistance = 2 + Math.random();
-  const movements = new Movements(bot);
-  movements.canDig = false;
-  movements.sprint = (currentSpeed === 'sprint');
-  
-  bot.pathfinder.setMovements(movements);
-  bot.pathfinder.setGoal(new goals.GoalFollow(player, followDistance), true);
-  
-  setTimeout(() => {
-    stopFollowing();
-    console.log('[AI] 30 seconds elapsed, returning to normal activity');
-  }, 30000);
+  try {
+    const followDistance = 2 + Math.random();
+    const movements = new Movements(bot);
+    movements.canDig = false;
+    movements.sprint = (currentSpeed === 'sprint');
+    
+    bot.pathfinder.setMovements(movements);
+    bot.pathfinder.setGoal(new goals.GoalFollow(player, followDistance), true);
+    
+    setTimeout(() => {
+      stopFollowing();
+      console.log('[AI] 30 seconds elapsed, returning to normal activity');
+    }, 30000);
+  } catch (error) {
+    console.log('[AI] Failed to follow player');
+    isFollowingPlayer = false;
+    followingPlayer = null;
+  }
 }
 
 function stopFollowing() {
   if (isFollowingPlayer) {
     console.log('[AI] Stopped following');
-    bot.pathfinder.setGoal(null);
+    if (bot && bot.pathfinder) {
+      try {
+        bot.pathfinder.setGoal(null);
+      } catch (e) {
+        // Ignore pathfinder errors
+      }
+    }
     isFollowingPlayer = false;
     followingPlayer = null;
     isMoving = false;
@@ -354,7 +383,6 @@ async function checkForPlayers() {
 }
 
 // Hunger and eating management
-var isGettingFood = false;
 const foodChestLocation = new Vec3(2319, 77, 2975);
 
 function findSteakInInventory() {
@@ -363,7 +391,7 @@ function findSteakInInventory() {
 }
 
 async function goToChestAndGetSteak() {
-  if (isGettingFood || isPerformingAction) return;
+  if (isGettingFood || isPerformingAction || !bot || !bot.pathfinder) return;
   
   console.log('[AI] No steak in inventory, going to chest to get food');
   isGettingFood = true;
@@ -466,11 +494,17 @@ async function checkHungerAndEat() {
   }
 }
 
-// Clear all AI intervals
+// Clear all AI intervals and timeouts
 function clearAIIntervals() {
   aiIntervals.forEach(intervalId => clearInterval(intervalId));
   aiIntervals = [];
   aiStarted = false;
+  
+  // Clear speed change timeout to prevent memory leak
+  if (speedChangeTimeout) {
+    clearTimeout(speedChangeTimeout);
+    speedChangeTimeout = null;
+  }
 }
 
 // Main AI Loop
@@ -639,29 +673,28 @@ function setupEventHandlers() {
       clearTimeout(reconnectTimeout);
     }
     
-    reconnectTimeout = setTimeout(() => {
+    reconnectTimeout = setTimeout(attemptReconnection, delay);
+    
+    function attemptReconnection() {
       try {
         console.log('[Bot] Attempting to reconnect...');
-        bot = createBot();
-        if (bot) {
+        const newBot = createBot();
+        if (newBot) {
+          bot = newBot;
           setupEventHandlers();
-        } else {
-          console.log('[Bot] Failed to create bot, will retry...');
           isReconnecting = false;
-          // Trigger another reconnection attempt
-          setTimeout(() => {
-            const fakeEndEvent = bot.on ? bot.on.bind(bot) : null;
-            if (fakeEndEvent) {
-              bot.emit('end', 'Failed to create bot');
-            }
-          }, 5000);
+        } else {
+          console.log('[Bot] Failed to create bot, will retry in 5 seconds...');
+          isReconnecting = false;
+          reconnectTimeout = setTimeout(attemptReconnection, 5000);
         }
       } catch (error) {
         console.error('[Bot] Reconnection error:', error.message);
         isReconnecting = false;
+        console.log('[Bot] Will retry in 5 seconds...');
+        reconnectTimeout = setTimeout(attemptReconnection, 5000);
       }
-      isReconnecting = false;
-    }, delay);
+    }
   });
 
   bot.on('kicked', function(reason) {
