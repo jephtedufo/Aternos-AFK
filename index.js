@@ -23,11 +23,17 @@ var aiReady = false;
 // Reconnection variables
 let reconnectAttempts = 0;
 const maxReconnectDelay = 60000; // 1 minute max
+const initialReconnectDelay = 5000; // Start with 5 seconds
 let bot;
+let reconnectTimeout = null;
+let isReconnecting = false;
 
 // AI Loop interval IDs to prevent duplicates
 let aiIntervals = [];
 let aiStarted = false;
+
+// Keep-alive interval
+let keepAliveInterval = null;
 
 function createBot() {
   const config = {
@@ -35,17 +41,41 @@ function createBot() {
     port: data["port"] ? parseInt(data["port"]) : undefined,
     username: data["name"],
     version: data["version"] || false,
-    closeTimeout: 60000,
-    checkTimeoutInterval: 30000
+    closeTimeout: 120000, // Increased to 2 minutes
+    checkTimeoutInterval: 60000, // Increased to 1 minute
+    keepAlive: true, // Enable TCP keep-alive
+    hideErrors: false // Show all errors for debugging
   };
 
   console.log(`[Bot] Connecting to ${config.host}${config.port ? ':' + config.port : ''}...`);
   console.log(`[Bot] Note: If using Aternos, make sure the server is online first!`);
   
-  bot = mineflayer.createBot(config);
-  bot.loadPlugin(pathfinder);
-  
-  return bot;
+  try {
+    bot = mineflayer.createBot(config);
+    bot.loadPlugin(pathfinder);
+    
+    // Set up keep-alive to prevent idle disconnections
+    if (keepAliveInterval) {
+      clearInterval(keepAliveInterval);
+    }
+    
+    // Send a small movement packet every 30 seconds to keep connection alive
+    keepAliveInterval = setInterval(() => {
+      if (bot && connected && bot.entity) {
+        try {
+          // Just look around slightly to show activity
+          bot.look(bot.entity.yaw + 0.01, bot.entity.pitch, true);
+        } catch (e) {
+          // Ignore errors
+        }
+      }
+    }, 30000);
+    
+    return bot;
+  } catch (error) {
+    console.error('[Bot] Failed to create bot:', error.message);
+    return null;
+  }
 }
 
 bot = createBot();
@@ -533,19 +563,27 @@ function setupEventHandlers() {
     console.log("Bot spawned!");
     connected = true;
     aiReady = false;
-    reconnectAttempts = 0;
+    reconnectAttempts = 0; // Reset reconnection counter on successful spawn
+    isReconnecting = false; // Reset reconnection flag
+    
+    // Clear any pending reconnection timeouts
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
     
     setTimeout(() => {
-      if (bot.entity && bot.entity.position) {
+      if (bot && bot.entity && bot.entity.position) {
         spawnPoint = bot.entity.position.clone();
         console.log(`\n${"=".repeat(50)}`);
         console.log(`M3GAN AI System Initializing...`);
         console.log(`Spawn: X=${spawnPoint.x.toFixed(1)}, Y=${spawnPoint.y.toFixed(1)}, Z=${spawnPoint.z.toFixed(1)}`);
+        console.log(`Connection: STABLE | Reconnect attempts: 0`);
         console.log("=".repeat(50));
         
         setTimeout(() => {
           aiReady = true;
-          console.log("[AI] M3GAN is now active\n");
+          console.log("[AI] M3GAN is now active and ready for 24/7 operation\n");
           startAI();
         }, 3000);
       }
@@ -566,8 +604,8 @@ function setupEventHandlers() {
     }
   });
 
-  bot.on('end', function() {
-    console.log('[Bot] Disconnected from server');
+  bot.on('end', function(reason) {
+    console.log('[Bot] Disconnected from server. Reason:', reason || 'Unknown');
     connected = false;
     aiReady = false;
     isMoving = false;
@@ -577,14 +615,52 @@ function setupEventHandlers() {
     // Clear all AI intervals to prevent duplicates on reconnect
     clearAIIntervals();
     
+    // Clear keep-alive interval
+    if (keepAliveInterval) {
+      clearInterval(keepAliveInterval);
+      keepAliveInterval = null;
+    }
+    
+    // Prevent duplicate reconnection attempts
+    if (isReconnecting) {
+      console.log('[Bot] Reconnection already in progress, skipping...');
+      return;
+    }
+    
+    isReconnecting = true;
+    
     // Auto-reconnect with exponential backoff
     reconnectAttempts++;
-    const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), maxReconnectDelay);
+    const delay = Math.min(initialReconnectDelay * Math.pow(2, Math.min(reconnectAttempts - 1, 4)), maxReconnectDelay);
     console.log(`[Bot] Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})...`);
     
-    setTimeout(() => {
-      bot = createBot();
-      setupEventHandlers();
+    // Clear any existing reconnect timeout
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+    }
+    
+    reconnectTimeout = setTimeout(() => {
+      try {
+        console.log('[Bot] Attempting to reconnect...');
+        bot = createBot();
+        if (bot) {
+          setupEventHandlers();
+        } else {
+          console.log('[Bot] Failed to create bot, will retry...');
+          isReconnecting = false;
+          // Trigger another reconnection attempt
+          setTimeout(() => {
+            const fakeEndEvent = bot.on ? bot.on.bind(bot) : null;
+            if (fakeEndEvent) {
+              bot.emit('end', 'Failed to create bot');
+            }
+          }, 5000);
+        }
+      } catch (error) {
+        console.error('[Bot] Reconnection error:', error.message);
+        isReconnecting = false;
+      }
+      isReconnecting = false;
     }, delay);
   });
 
@@ -595,38 +671,42 @@ function setupEventHandlers() {
   });
 
   bot.on('error', function(err) {
+    if (!err) return;
+    
     console.error(`[Bot] Error occurred:`, {
-      code: err.code,
-      message: err.message,
-      syscall: err.syscall
+      code: err.code || 'UNKNOWN',
+      message: err.message || 'Unknown error',
+      syscall: err.syscall || 'N/A'
     });
     
     // Handle connection errors (ECONNRESET, ECONNREFUSED, etc.)
-    if (err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
-      console.log(`[Bot] Connection error detected. The server might be offline.`);
+    const connectionErrors = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'];
+    if (connectionErrors.includes(err.code)) {
+      console.log(`[Bot] Connection error detected (${err.code}). Server may be offline or unreachable.`);
       
-      // Don't trigger reconnect immediately if already disconnected
-      if (!connected) {
-        console.log(`[Bot] Waiting for automatic reconnect...`);
-        return;
+      // Don't manually handle disconnection - let the 'end' event handle it
+      // Just update the state
+      if (connected) {
+        connected = false;
+        aiReady = false;
+        isMoving = false;
+        isPerformingAction = false;
+        isFollowingPlayer = false;
+        clearAIIntervals();
       }
       
-      // Manually trigger disconnect handling
-      connected = false;
-      aiReady = false;
-      isMoving = false;
-      isPerformingAction = false;
-      isFollowingPlayer = false;
-      clearAIIntervals();
-      
-      // Try to disconnect gracefully
-      if (bot && typeof bot.quit === 'function') {
-        try {
-          bot.quit();
-        } catch (e) {
-          // Ignore quit errors, let the 'end' event handle reconnection
-        }
-      }
+      // The 'end' event will trigger automatically and handle reconnection
+      console.log(`[Bot] Waiting for 'end' event to trigger reconnection...`);
     }
+  });
+  
+  // Add health check
+  bot.on('health', function() {
+    // Bot is alive and responding
+  });
+  
+  // Monitor connection state
+  bot.on('disconnect', function(packet) {
+    console.log('[Bot] Received disconnect packet:', packet.reason);
   });
 }
