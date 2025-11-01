@@ -502,16 +502,24 @@ function startAI() {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('[Bot] Shutting down gracefully...');
-  if (bot) {
-    bot.quit();
+  if (bot && typeof bot.quit === 'function') {
+    try {
+      bot.quit();
+    } catch (e) {
+      console.log('[Bot] Error during quit:', e.message);
+    }
   }
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log('[Bot] Shutting down gracefully...');
-  if (bot) {
-    bot.quit();
+  if (bot && typeof bot.quit === 'function') {
+    try {
+      bot.quit();
+    } catch (e) {
+      console.log('[Bot] Error during quit:', e.message);
+    }
   }
   process.exit(0);
 });
@@ -599,7 +607,7 @@ function setupEventHandlers() {
       
       // Don't trigger reconnect immediately if already disconnected
       if (!connected) {
-        console.log(`[Bot] Already disconnected, waiting for 'end' event to trigger reconnect...`);
+        console.log(`[Bot] Waiting for automatic reconnect...`);
         return;
       }
       
@@ -612,11 +620,11 @@ function setupEventHandlers() {
       clearAIIntervals();
       
       // Try to disconnect gracefully
-      if (bot) {
+      if (bot && typeof bot.quit === 'function') {
         try {
           bot.quit();
         } catch (e) {
-          // Ignore quit errors
+          // Ignore quit errors, let the 'end' event handle reconnection
         }
       }
     }
