@@ -54,12 +54,29 @@ To change chest location, edit `index.js`:
   - Non-destructive (doesn't break or place blocks)
 
 ## Important Notes
-- Bot is designed for Minecraft 1.16.5 servers
-- For other versions, server needs ViaVersion and ViaRewind plugins
+- **Version Compatibility**: Bot supports Minecraft Java Edition 1.8 through 1.21.8
+- **Version 1.21.10 NOT SUPPORTED**: The minecraft-data library doesn't support protocol 773 (1.21.10) yet
+- **Current Configuration**: Set to version 1.21.8 in config.json
 - If server has login plugins or antibot protection, whitelist the bot
-- Current setup uses Node.js 20 (mineflayer recommends 22, but should work)
+- Current setup uses Node.js 22 for best compatibility
+- mineflayer installed from GitHub (PrismarineJS/mineflayer) for latest updates
+
+## Version Compatibility
+**See VERSION_COMPATIBILITY.md for detailed version information**
+
+### Current Limitation (November 2025)
+- Maximum supported version: **Minecraft 1.21.8** (protocol 767)
+- Minecraft 1.21.10 (protocol 773) is **not yet supported** by minecraft-data
+- If your server is running 1.21.10, you must downgrade it to 1.21.8 or earlier
+- Monitor https://github.com/PrismarineJS/minecraft-data for 1.21.10 support updates
 
 ## Recent Changes
+- 2025-11-03: Version compatibility updates
+  - Updated mineflayer to latest GitHub version (PrismarineJS/mineflayer)
+  - Documented version 1.21.10 limitation
+  - Created VERSION_COMPATIBILITY.md guide
+  - Updated README.md with clear version requirements
+  - Configured bot for maximum supported version (1.21.8)
 - 2025-10-31: Production-ready deployment improvements
   - **Auto-reconnection** with exponential backoff (5s → 60s max delay)
   - **Robust error handling** for ECONNRESET, EPIPE, and network errors
