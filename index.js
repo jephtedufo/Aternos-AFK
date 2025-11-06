@@ -19,12 +19,12 @@ var followingPlayer = null;
 var isFollowingPlayer = false;
 var currentSpeed = 'walk';
 var aiReady = false;
-var isGettingFood = false; // Moved here to fix hoisting issue
+var isGettingFood = false;
 
 // Reconnection variables
 let reconnectAttempts = 0;
-const maxReconnectDelay = 60000; // 1 minute max
-const initialReconnectDelay = 5000; // Start with 5 seconds
+const maxReconnectDelay = 60000;
+const initialReconnectDelay = 5000;
 let bot;
 let reconnectTimeout = null;
 let isReconnecting = false;
@@ -38,6 +38,70 @@ let keepAliveInterval = null;
 
 // Speed change timeout to prevent memory leaks
 let speedChangeTimeout = null;
+
+// ==================== ENHANCED AI DECISION SYSTEM ====================
+// AI Behavioral Moods - changes how the bot makes decisions
+var currentMood = 'curious';
+var moodChangeTimeout = null;
+
+// Movement variation
+var movementStyle = 'normal';
+var isCrouching = false;
+var lastActionTime = Date.now();
+
+// Decision weights that change based on mood
+const moodProfiles = {
+  curious: {
+    exploreChance: 0.7,
+    interactChance: 0.6,
+    followChance: 0.4,
+    pauseChance: 0.2,
+    sprintChance: 0.3,
+    crouchChance: 0.2,
+    wanderRadius: 20,
+    hungerThreshold: 12
+  },
+  energetic: {
+    exploreChance: 0.9,
+    interactChance: 0.5,
+    followChance: 0.7,
+    pauseChance: 0.1,
+    sprintChance: 0.7,
+    crouchChance: 0.1,
+    wanderRadius: 25,
+    hungerThreshold: 10
+  },
+  cautious: {
+    exploreChance: 0.4,
+    interactChance: 0.3,
+    followChance: 0.2,
+    pauseChance: 0.4,
+    sprintChance: 0.1,
+    crouchChance: 0.5,
+    wanderRadius: 10,
+    hungerThreshold: 16
+  },
+  playful: {
+    exploreChance: 0.6,
+    interactChance: 0.8,
+    followChance: 0.6,
+    pauseChance: 0.3,
+    sprintChance: 0.5,
+    crouchChance: 0.4,
+    wanderRadius: 18,
+    hungerThreshold: 14
+  },
+  focused: {
+    exploreChance: 0.5,
+    interactChance: 0.4,
+    followChance: 0.3,
+    pauseChance: 0.2,
+    sprintChance: 0.4,
+    crouchChance: 0.2,
+    wanderRadius: 15,
+    hungerThreshold: 15
+  }
+};
 
 function createBot() {
   const config = {
@@ -85,16 +149,68 @@ function createBot() {
 bot = createBot();
 setupEventHandlers();
 
+// ==================== ENHANCED AI DECISION ENGINE ====================
+
+// Randomly change the bot's behavioral mood
+function changeMood() {
+  if (!aiReady || !connected) return;
+  
+  const moods = ['curious', 'energetic', 'cautious', 'playful', 'focused'];
+  const oldMood = currentMood;
+  
+  // Don't pick the same mood
+  const availableMoods = moods.filter(m => m !== currentMood);
+  currentMood = availableMoods[Math.floor(Math.random() * availableMoods.length)];
+  
+  console.log(`[AI] Mood changed from ${oldMood} to ${currentMood}`);
+  
+  // Update maxDistance based on new mood
+  maxDistance = moodProfiles[currentMood].wanderRadius;
+  
+  // Schedule next mood change (30 seconds to 3 minutes)
+  const nextMoodChange = 30000 + Math.random() * 150000;
+  if (moodChangeTimeout) clearTimeout(moodChangeTimeout);
+  moodChangeTimeout = setTimeout(() => changeMood(), nextMoodChange);
+}
+
+// Get current mood profile for decision making
+function getMoodProfile() {
+  return moodProfiles[currentMood] || moodProfiles.curious;
+}
+
+// Weighted random decision maker
+function shouldDoAction(actionChance) {
+  return Math.random() < actionChance;
+}
+
 // ==================== CORE AI FUNCTIONS ====================
 
 function getSmartWanderPosition() {
   if (!spawnPoint) return null;
   
-  const dist = 5 + Math.random() * maxDistance;
+  const mood = getMoodProfile();
+  const baseDistance = 5;
+  const dist = baseDistance + Math.random() * mood.wanderRadius;
   const angle = Math.random() * Math.PI * 2;
   
-  const x = spawnPoint.x + Math.cos(angle) * dist;
-  const z = spawnPoint.z + Math.sin(angle) * dist;
+  // Sometimes wander in a circle pattern, sometimes random
+  const pattern = Math.random();
+  let x, z;
+  
+  if (pattern < 0.3) {
+    // Circular pattern
+    x = spawnPoint.x + Math.cos(angle) * dist;
+    z = spawnPoint.z + Math.sin(angle) * dist;
+  } else if (pattern < 0.6) {
+    // Figure-8 pattern
+    x = spawnPoint.x + Math.cos(angle) * dist + Math.sin(angle * 2) * (dist * 0.5);
+    z = spawnPoint.z + Math.sin(angle) * dist;
+  } else {
+    // Random exploration
+    x = spawnPoint.x + (Math.random() - 0.5) * mood.wanderRadius * 2;
+    z = spawnPoint.z + (Math.random() - 0.5) * mood.wanderRadius * 2;
+  }
+  
   const y = spawnPoint.y;
   
   return new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
@@ -102,27 +218,38 @@ function getSmartWanderPosition() {
 
 function startWandering() {
   if (!aiReady || !connected || isMoving || isPerformingAction || isFollowingPlayer) return;
-  if (!bot || !bot.pathfinder) return; // Safety check
+  if (!bot || !bot.pathfinder) return;
   
   const targetPos = getSmartWanderPosition();
   if (!targetPos) return;
   
+  const mood = getMoodProfile();
   const shouldSprint = (currentSpeed === 'sprint');
+  const shouldCrouch = (currentSpeed === 'crouch');
   
   try {
     const movements = new Movements(bot);
     movements.canDig = false;
     movements.allow1by1towers = false;
     movements.scafoldingBlocks = [];
-    movements.sprint = shouldSprint;
+    movements.sprint = shouldSprint && !shouldCrouch;
+    
+    // Apply crouching if that's the current speed
+    if (shouldCrouch && bot.entity) {
+      bot.setControlState('sneak', true);
+      isCrouching = true;
+    } else if (isCrouching) {
+      bot.setControlState('sneak', false);
+      isCrouching = false;
+    }
     
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 1));
     
     isMoving = true;
-    console.log(`[Move] ${shouldSprint ? 'Running' : 'Walking'} to X=${targetPos.x}, Z=${targetPos.z}`);
+    const moveType = shouldCrouch ? 'Crouching' : (shouldSprint ? 'Running' : 'Walking');
+    console.log(`[Move] ${moveType} to X=${targetPos.x}, Z=${targetPos.z} (Mood: ${currentMood})`);
   } catch (error) {
-    // Silently handle pathfinding errors
     isMoving = false;
   }
 }
@@ -130,26 +257,48 @@ function startWandering() {
 function randomSpeedChange() {
   if (!aiReady || !connected) return;
   
+  const mood = getMoodProfile();
   const rand = Math.random();
   
-  if (rand < 0.7) {
-    currentSpeed = 'walk';
-  } else if (rand < 0.9) {
-    currentSpeed = 'sprint';
+  // Mood-based speed decisions with more variety
+  let newSpeed;
+  if (rand < mood.sprintChance) {
+    newSpeed = 'sprint';
+  } else if (rand < mood.sprintChance + mood.crouchChance) {
+    newSpeed = 'crouch';
+  } else if (rand < mood.sprintChance + mood.crouchChance + mood.pauseChance) {
+    newSpeed = 'pause';
   } else {
-    currentSpeed = 'pause';
-    if (isMoving && bot && bot.pathfinder) {
-      bot.pathfinder.setGoal(null);
-      isMoving = false;
-      console.log('[AI] Pausing...');
+    newSpeed = 'walk';
+  }
+  
+  // Only change if it's actually different
+  if (newSpeed !== currentSpeed) {
+    currentSpeed = newSpeed;
+    
+    if (currentSpeed === 'pause') {
+      if (isMoving && bot && bot.pathfinder) {
+        bot.pathfinder.setGoal(null);
+        isMoving = false;
+        console.log('[AI] Taking a break...');
+      }
+    } else if (currentSpeed === 'crouch' && !isCrouching) {
+      console.log('[AI] Moving cautiously (crouching)');
+    } else if (currentSpeed === 'sprint') {
+      console.log('[AI] Feeling energetic, time to run!');
     }
   }
   
-  const duration = currentSpeed === 'sprint' ? 3000 + Math.random() * 3000 : 
-                   currentSpeed === 'pause' ? 2000 + Math.random() * 2000 :
-                   8000 + Math.random() * 7000;
+  // Variable duration based on speed and mood
+  const baseDuration = {
+    sprint: 2000 + Math.random() * 4000,
+    crouch: 3000 + Math.random() * 5000,
+    pause: 1000 + Math.random() * 3000,
+    walk: 5000 + Math.random() * 10000
+  };
   
-  // Clear any existing timeout and store the new one to prevent memory leaks
+  const duration = baseDuration[currentSpeed] || 5000;
+  
   if (speedChangeTimeout) {
     clearTimeout(speedChangeTimeout);
   }
@@ -173,34 +322,93 @@ async function randomlyHoldItem() {
   }
 }
 
-// Random movements (crouch/jump)
+// Enhanced random movements with more variety
 async function randomMovements() {
   if (!aiReady || isPerformingAction) return;
   
-  const rand = Math.random();
+  const mood = getMoodProfile();
+  const actionType = Math.random();
   
-  if (rand < 0.3) {
-    // Crouch for a few seconds
-    const duration = 2000 + Math.random() * 3000;
-    console.log('[AI] Crouching...');
-    bot.setControlState('sneak', true);
-    
-    setTimeout(() => {
-      bot.setControlState('sneak', false);
-      console.log('[AI] Stopped crouching');
-    }, duration);
-    
-  } else if (rand < 0.6) {
-    // Jump a few times
-    const jumps = 2 + Math.floor(Math.random() * 3);
-    console.log(`[AI] Jumping ${jumps} times`);
-    
-    for (let i = 0; i < jumps; i++) {
+  try {
+    if (actionType < 0.25) {
+      // Crouch for varying duration
+      const duration = 1000 + Math.random() * 4000;
+      console.log('[AI] Crouching and looking around...');
+      bot.setControlState('sneak', true);
+      
+      // Look around while crouching
+      setTimeout(async () => {
+        if (bot && bot.entity) {
+          const randomYaw = bot.entity.yaw + (Math.random() - 0.5) * Math.PI;
+          await bot.look(randomYaw, 0, true);
+        }
+      }, duration / 2);
+      
+      setTimeout(() => {
+        if (bot) bot.setControlState('sneak', false);
+      }, duration);
+      
+    } else if (actionType < 0.45) {
+      // Jump varying amounts
+      const jumps = 1 + Math.floor(Math.random() * 5);
+      const jumpStyle = Math.random();
+      
+      if (jumpStyle < 0.5) {
+        // Quick successive jumps
+        console.log(`[AI] Jumping excitedly ${jumps} times`);
+        for (let i = 0; i < jumps; i++) {
+          bot.setControlState('jump', true);
+          await new Promise(resolve => setTimeout(resolve, 100));
+          bot.setControlState('jump', false);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      } else {
+        // Spaced out jumps
+        console.log(`[AI] Bouncing around playfully`);
+        for (let i = 0; i < jumps; i++) {
+          bot.setControlState('jump', true);
+          await new Promise(resolve => setTimeout(resolve, 100));
+          bot.setControlState('jump', false);
+          await new Promise(resolve => setTimeout(resolve, 600 + Math.random() * 400));
+        }
+      }
+      
+    } else if (actionType < 0.65) {
+      // Spin around
+      console.log('[AI] Spinning around');
+      if (bot && bot.entity) {
+        const startYaw = bot.entity.yaw;
+        const spinSteps = 8;
+        for (let i = 0; i < spinSteps; i++) {
+          await bot.look(startYaw + (Math.PI * 2 * i / spinSteps), 0, true);
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      
+    } else if (actionType < 0.80) {
+      // Look up and down (like observing)
+      console.log('[AI] Observing surroundings');
+      if (bot && bot.entity) {
+        await bot.look(bot.entity.yaw, -Math.PI / 4, true); // Look up
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await bot.look(bot.entity.yaw, Math.PI / 6, true); // Look down
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await bot.look(bot.entity.yaw, 0, true); // Look straight
+      }
+      
+    } else {
+      // Crouch-jump combo
+      console.log('[AI] Performing crouch-jump');
+      bot.setControlState('sneak', true);
+      await new Promise(resolve => setTimeout(resolve, 300));
       bot.setControlState('jump', true);
       await new Promise(resolve => setTimeout(resolve, 100));
       bot.setControlState('jump', false);
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await new Promise(resolve => setTimeout(resolve, 200));
+      bot.setControlState('sneak', false);
     }
+  } catch (error) {
+    // Silently handle errors
   }
 }
 
@@ -382,8 +590,28 @@ async function checkForPlayers() {
   }
 }
 
-// Hunger and eating management
+// Enhanced hunger and eating management
 const foodChestLocation = new Vec3(2319, 77, 2975);
+
+// Find any edible food in inventory
+function findFoodInInventory() {
+  const items = bot.inventory.items();
+  const foodItems = [
+    'cooked_beef', 'beef', 'cooked_porkchop', 'porkchop',
+    'cooked_chicken', 'chicken', 'cooked_mutton', 'mutton',
+    'bread', 'baked_potato', 'potato', 'carrot', 'apple',
+    'cooked_salmon', 'salmon', 'cooked_cod', 'cod', 'cookie',
+    'melon_slice', 'sweet_berries', 'golden_apple', 'golden_carrot'
+  ];
+  
+  // Prefer cooked food over raw
+  for (const foodName of foodItems) {
+    const food = items.find(item => item.name === foodName);
+    if (food) return food;
+  }
+  
+  return null;
+}
 
 function findSteakInInventory() {
   const items = bot.inventory.items();
@@ -452,39 +680,48 @@ async function goToChestAndGetSteak() {
 async function checkHungerAndEat() {
   if (!aiReady || !bot.entity || isGettingFood || isPerformingAction) return;
   
-  const food = bot.food || 20;
-  const hungerThreshold = 14;
+  const mood = getMoodProfile();
+  const currentHunger = bot.food || 20;
+  const hungerThreshold = mood.hungerThreshold;
   
-  if (food < hungerThreshold) {
-    console.log(`[AI] Hunger is low (${food}/20), looking for food`);
+  // Proactive eating - eat before getting too hungry based on mood
+  if (currentHunger < hungerThreshold) {
+    console.log(`[AI] Hunger at ${currentHunger}/20 (threshold: ${hungerThreshold}), time to eat`);
     isPerformingAction = true;
     
     try {
-      let steakItem = findSteakInInventory();
+      let foodItem = findFoodInInventory();
       
-      if (!steakItem) {
-        console.log('[AI] No steak in inventory');
+      if (!foodItem) {
+        console.log('[AI] No food in inventory, heading to food chest');
         isPerformingAction = false;
         await goToChestAndGetSteak();
         await new Promise(resolve => setTimeout(resolve, 1000));
-        steakItem = findSteakInInventory();
+        foodItem = findFoodInInventory();
         isPerformingAction = true;
       }
       
-      if (steakItem) {
-        console.log(`[AI] Found ${steakItem.name} in inventory, preparing to eat`);
+      if (foodItem) {
+        console.log(`[AI] Found ${foodItem.name} in inventory, preparing to eat`);
         
-        await bot.equip(steakItem, 'hand');
+        await bot.equip(foodItem, 'hand');
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        console.log(`[AI] Eating ${steakItem.name}...`);
+        console.log(`[AI] Eating ${foodItem.name}... nom nom nom`);
         bot.activateItem();
         
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        console.log(`[AI] Finished eating! Hunger now: ${bot.food}/20`);
+        const newHunger = bot.food || 20;
+        console.log(`[AI] Finished eating! Hunger: ${currentHunger} -> ${newHunger}/20`);
+        
+        // Eat more if still hungry
+        if (newHunger < hungerThreshold - 2) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          await checkHungerAndEat();
+        }
       } else {
-        console.log('[AI] Still no steak available after checking chest');
+        console.log('[AI] Still no food available after checking chest - will try again soon');
       }
     } catch (error) {
       console.log('[AI] Failed to eat:', error.message);
@@ -500,67 +737,111 @@ function clearAIIntervals() {
   aiIntervals = [];
   aiStarted = false;
   
-  // Clear speed change timeout to prevent memory leak
   if (speedChangeTimeout) {
     clearTimeout(speedChangeTimeout);
     speedChangeTimeout = null;
   }
+  
+  if (moodChangeTimeout) {
+    clearTimeout(moodChangeTimeout);
+    moodChangeTimeout = null;
+  }
 }
 
-// Main AI Loop
+// Dynamic decision maker - constantly varying intervals
+function createDynamicInterval(action, baseMin, baseMax, chanceFunc) {
+  function scheduleNext() {
+    if (!aiReady || !aiStarted) return;
+    
+    const mood = getMoodProfile();
+    const shouldAct = chanceFunc ? shouldDoAction(chanceFunc(mood)) : true;
+    
+    if (shouldAct) {
+      action();
+    }
+    
+    // Highly variable timing - never the same twice
+    const nextDelay = baseMin + Math.random() * (baseMax - baseMin);
+    const timeoutId = setTimeout(scheduleNext, nextDelay);
+    aiIntervals.push(timeoutId);
+  }
+  
+  scheduleNext();
+}
+
+// Enhanced Main AI Loop with dynamic decision making
 function startAI() {
-  // Prevent duplicate AI loops
   if (aiStarted) {
     console.log('[AI] AI loop already running, skipping duplicate start');
     return;
   }
   
   aiStarted = true;
+  console.log('[AI] Starting enhanced AI decision system...');
+  
+  // Initialize mood system
+  changeMood();
   randomSpeedChange();
   
-  // Environment check every 8-12 seconds
-  aiIntervals.push(setInterval(() => {
-    if (aiReady && Math.random() < 0.2) {
-      checkEnvironment();
-    }
-  }, 8000 + Math.random() * 4000));
+  // Hunger check - most critical, check frequently (2-5 seconds)
+  createDynamicInterval(() => {
+    if (aiReady) checkHungerAndEat();
+  }, 2000, 5000);
   
-  // Player check every 5-8 seconds
-  aiIntervals.push(setInterval(() => {
-    if (aiReady && Math.random() < 0.4) {
-      checkForPlayers();
+  // Environment interaction - varies by mood (5-15 seconds)
+  createDynamicInterval(() => {
+    if (aiReady && !isPerformingAction && !isFollowingPlayer) {
+      const mood = getMoodProfile();
+      if (shouldDoAction(mood.interactChance)) {
+        checkEnvironment();
+      }
     }
-  }, 5000 + Math.random() * 3000));
+  }, 5000, 15000);
   
-  // Hunger check every 3 seconds
-  aiIntervals.push(setInterval(() => {
-    if (aiReady) {
-      checkHungerAndEat();
+  // Player detection - varies by mood (3-10 seconds)
+  createDynamicInterval(() => {
+    if (aiReady && !isPerformingAction && !isFollowingPlayer) {
+      const mood = getMoodProfile();
+      if (shouldDoAction(mood.followChance)) {
+        checkForPlayers();
+      }
     }
-  }, 3000));
+  }, 3000, 10000);
   
-  // Random item holding every 10-20 seconds
-  aiIntervals.push(setInterval(() => {
-    if (aiReady && Math.random() < 0.3) {
-      randomlyHoldItem();
+  // Random movements - highly variable (4-20 seconds)
+  createDynamicInterval(() => {
+    if (aiReady && !isPerformingAction) {
+      if (shouldDoAction(0.5)) {
+        randomMovements();
+      }
     }
-  }, 10000 + Math.random() * 10000));
+  }, 4000, 20000);
   
-  // Random movements (crouch/jump) every 8-15 seconds
-  aiIntervals.push(setInterval(() => {
-    if (aiReady && Math.random() < 0.4) {
-      randomMovements();
+  // Item holding - occasional and unpredictable (8-30 seconds)
+  createDynamicInterval(() => {
+    if (aiReady && !isPerformingAction && !isGettingFood) {
+      if (shouldDoAction(0.4)) {
+        randomlyHoldItem();
+      }
     }
-  }, 8000 + Math.random() * 7000));
+  }, 8000, 30000);
   
-  // Wander loop every 3-6 seconds
-  aiIntervals.push(setInterval(() => {
+  // Wandering - most common activity (2-8 seconds)
+  createDynamicInterval(() => {
     if (aiReady && !isMoving && !isPerformingAction && !isFollowingPlayer) {
-      startWandering();
+      const mood = getMoodProfile();
+      if (shouldDoAction(mood.exploreChance)) {
+        startWandering();
+      }
     }
-  }, 3000 + Math.random() * 3000));
+  }, 2000, 8000);
   
-  setTimeout(() => startWandering(), 2000);
+  // Start initial wander
+  setTimeout(() => {
+    if (aiReady) startWandering();
+  }, 2000);
+  
+  console.log('[AI] Enhanced AI system active - behavior patterns will vary dynamically');
 }
 
 // Graceful shutdown
