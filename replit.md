@@ -103,6 +103,17 @@ To change food chest location, edit `index.js`:
 - Monitor https://github.com/PrismarineJS/minecraft-data for 1.21.10 support updates
 
 ## Recent Changes
+- 2025-12-01: **RAILWAY OPTIMIZATION UPDATE**
+  - Replaced multiple competing intervals with single unified AI loop (prevents memory leaks)
+  - Added action timeout watchdog (15s max per action) to detect stuck states
+  - Added idle detection watchdog (60s activity check) to force movement when bot freezes
+  - Added force state reset function to recover from stuck conditions
+  - Added uncaught exception/rejection handlers to prevent crashes
+  - Improved keep_alive.js with health endpoints (/health, /ping) and self-ping every 5 minutes
+  - Simplified random movements to reduce action blocking
+  - Memory leak prevention with proper interval cleanup on disconnect/reconnect
+  - Bot now runs smoother on Railway, Heroku, and other platforms
+
 - 2025-11-06: **MAJOR UPDATE - Enhanced AI Decision System**
   - Implemented behavioral mood system (5 moods with unique decision patterns)
   - Added 3 varied movement patterns (circular, figure-8, random)

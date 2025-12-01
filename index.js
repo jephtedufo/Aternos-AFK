@@ -1,4 +1,4 @@
-const mineflayer = require('mineflayer')
+const mineflayer = require('mineflayer');
 const fs = require('fs');
 const { keep_alive } = require("./keep_alive");
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
@@ -21,33 +21,33 @@ var currentSpeed = 'walk';
 var aiReady = false;
 var isGettingFood = false;
 
-// Reconnection variables
+// Reconnection variables - STABILIZED to prevent rapid leave/rejoin
 let reconnectAttempts = 0;
-const maxReconnectDelay = 60000;
-const initialReconnectDelay = 5000;
+const maxReconnectDelay = 300000; // Max 5 minutes between attempts
+const initialReconnectDelay = 30000; // Start with 30 seconds (servers need time)
 let bot;
 let reconnectTimeout = null;
 let isReconnecting = false;
+let lastConnectTime = 0;
+const MIN_CONNECTION_INTERVAL = 60000; // Minimum 60 seconds between connection attempts
 
-// AI Loop interval IDs to prevent duplicates
-let aiIntervals = [];
-let aiStarted = false;
-
-// Keep-alive interval
+// OPTIMIZED: Single interval tracking to prevent memory leaks
+let mainAIInterval = null;
 let keepAliveInterval = null;
+let watchdogInterval = null;
+let moodChangeTimeout = null;
 
-// Speed change timeout to prevent memory leaks
-let speedChangeTimeout = null;
+// OPTIMIZED: Action timeout watchdog - prevents bot from getting stuck
+let actionStartTime = 0;
+const ACTION_TIMEOUT = 15000; // Max 15 seconds for any action
 
-// ==================== ENHANCED AI DECISION SYSTEM ====================
-// AI Behavioral Moods - changes how the bot makes decisions
+// AI Behavioral Moods
 var currentMood = 'curious';
-var moodChangeTimeout = null;
 
 // Movement variation
-var movementStyle = 'normal';
 var isCrouching = false;
 var lastActionTime = Date.now();
+var lastActivityTime = Date.now();
 
 // Decision weights that change based on mood
 const moodProfiles = {
@@ -109,10 +109,10 @@ function createBot() {
     port: data["port"] ? parseInt(data["port"]) : undefined,
     username: data["name"],
     version: data["version"] || false,
-    closeTimeout: 120000, // Increased to 2 minutes
-    checkTimeoutInterval: 60000, // Increased to 1 minute
-    keepAlive: true, // Enable TCP keep-alive
-    hideErrors: false // Show all errors for debugging
+    closeTimeout: 120000,
+    checkTimeoutInterval: 60000,
+    keepAlive: true,
+    hideErrors: false
   };
 
   console.log(`[Bot] Connecting to ${config.host}${config.port ? ':' + config.port : ''}...`);
@@ -122,22 +122,8 @@ function createBot() {
     bot = mineflayer.createBot(config);
     bot.loadPlugin(pathfinder);
     
-    // Set up keep-alive to prevent idle disconnections
-    if (keepAliveInterval) {
-      clearInterval(keepAliveInterval);
-    }
-    
-    // Send a small movement packet every 30 seconds to keep connection alive
-    keepAliveInterval = setInterval(() => {
-      if (bot && connected && bot.entity) {
-        try {
-          // Just look around slightly to show activity
-          bot.look(bot.entity.yaw + 0.01, bot.entity.pitch, true);
-        } catch (e) {
-          // Ignore errors
-        }
-      }
-    }, 30000);
+    setupKeepAlive();
+    setupWatchdog();
     
     return bot;
   } catch (error) {
@@ -146,10 +132,80 @@ function createBot() {
   }
 }
 
+// OPTIMIZED: Better keep-alive system
+function setupKeepAlive() {
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  
+  keepAliveInterval = setInterval(() => {
+    if (bot && connected && bot.entity) {
+      try {
+        // Small movement to show activity
+        bot.look(bot.entity.yaw + 0.01, bot.entity.pitch, true);
+        lastActivityTime = Date.now();
+      } catch (e) {
+        // Ignore errors
+      }
+    }
+  }, 30000);
+}
+
+// OPTIMIZED: Watchdog to detect and fix stuck states
+function setupWatchdog() {
+  if (watchdogInterval) clearInterval(watchdogInterval);
+  
+  watchdogInterval = setInterval(() => {
+    if (!connected || !aiReady) return;
+    
+    const now = Date.now();
+    
+    // Check if action has been running too long
+    if (isPerformingAction && actionStartTime > 0) {
+      if (now - actionStartTime > ACTION_TIMEOUT) {
+        console.log('[Watchdog] Action timeout - forcing reset');
+        forceResetState();
+      }
+    }
+    
+    // Check if bot has been idle too long (60 seconds without activity)
+    if (now - lastActivityTime > 60000 && !isMoving && !isPerformingAction) {
+      console.log('[Watchdog] Bot appears idle - triggering activity');
+      lastActivityTime = now;
+      if (aiReady && !isFollowingPlayer) {
+        startWandering();
+      }
+    }
+    
+    // Memory cleanup - force garbage collection hint
+    if (global.gc) {
+      global.gc();
+    }
+  }, 5000);
+}
+
+// OPTIMIZED: Force reset stuck states
+function forceResetState() {
+  console.log('[State] Forcing state reset');
+  isPerformingAction = false;
+  isMoving = false;
+  isGettingFood = false;
+  actionStartTime = 0;
+  isCrouching = false;
+  
+  if (bot && bot.pathfinder) {
+    try {
+      bot.pathfinder.setGoal(null);
+      bot.setControlState('sneak', false);
+      bot.setControlState('jump', false);
+    } catch (e) {
+      // Ignore errors
+    }
+  }
+  
+  lastActivityTime = Date.now();
+}
+
 bot = createBot();
 setupEventHandlers();
-
-// ==================== ENHANCED AI DECISION ENGINE ====================
 
 // Randomly change the bot's behavioral mood
 function changeMood() {
@@ -158,32 +214,25 @@ function changeMood() {
   const moods = ['curious', 'energetic', 'cautious', 'playful', 'focused'];
   const oldMood = currentMood;
   
-  // Don't pick the same mood
   const availableMoods = moods.filter(m => m !== currentMood);
   currentMood = availableMoods[Math.floor(Math.random() * availableMoods.length)];
   
   console.log(`[AI] Mood changed from ${oldMood} to ${currentMood}`);
-  
-  // Update maxDistance based on new mood
   maxDistance = moodProfiles[currentMood].wanderRadius;
   
-  // Schedule next mood change (30 seconds to 3 minutes)
-  const nextMoodChange = 30000 + Math.random() * 150000;
+  // Schedule next mood change (1-3 minutes)
+  const nextMoodChange = 60000 + Math.random() * 120000;
   if (moodChangeTimeout) clearTimeout(moodChangeTimeout);
   moodChangeTimeout = setTimeout(() => changeMood(), nextMoodChange);
 }
 
-// Get current mood profile for decision making
 function getMoodProfile() {
   return moodProfiles[currentMood] || moodProfiles.curious;
 }
 
-// Weighted random decision maker
 function shouldDoAction(actionChance) {
   return Math.random() < actionChance;
 }
-
-// ==================== CORE AI FUNCTIONS ====================
 
 function getSmartWanderPosition() {
   if (!spawnPoint) return null;
@@ -193,26 +242,21 @@ function getSmartWanderPosition() {
   const dist = baseDistance + Math.random() * mood.wanderRadius;
   const angle = Math.random() * Math.PI * 2;
   
-  // Sometimes wander in a circle pattern, sometimes random
   const pattern = Math.random();
   let x, z;
   
   if (pattern < 0.3) {
-    // Circular pattern
     x = spawnPoint.x + Math.cos(angle) * dist;
     z = spawnPoint.z + Math.sin(angle) * dist;
   } else if (pattern < 0.6) {
-    // Figure-8 pattern
     x = spawnPoint.x + Math.cos(angle) * dist + Math.sin(angle * 2) * (dist * 0.5);
     z = spawnPoint.z + Math.sin(angle) * dist;
   } else {
-    // Random exploration
     x = spawnPoint.x + (Math.random() - 0.5) * mood.wanderRadius * 2;
     z = spawnPoint.z + (Math.random() - 0.5) * mood.wanderRadius * 2;
   }
   
   const y = spawnPoint.y;
-  
   return new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 }
 
@@ -223,7 +267,6 @@ function startWandering() {
   const targetPos = getSmartWanderPosition();
   if (!targetPos) return;
   
-  const mood = getMoodProfile();
   const shouldSprint = (currentSpeed === 'sprint');
   const shouldCrouch = (currentSpeed === 'crouch');
   
@@ -234,7 +277,6 @@ function startWandering() {
     movements.scafoldingBlocks = [];
     movements.sprint = shouldSprint && !shouldCrouch;
     
-    // Apply crouching if that's the current speed
     if (shouldCrouch && bot.entity) {
       bot.setControlState('sneak', true);
       isCrouching = true;
@@ -247,6 +289,7 @@ function startWandering() {
     bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 1));
     
     isMoving = true;
+    lastActivityTime = Date.now();
     const moveType = shouldCrouch ? 'Crouching' : (shouldSprint ? 'Running' : 'Walking');
     console.log(`[Move] ${moveType} to X=${targetPos.x}, Z=${targetPos.z} (Mood: ${currentMood})`);
   } catch (error) {
@@ -260,7 +303,6 @@ function randomSpeedChange() {
   const mood = getMoodProfile();
   const rand = Math.random();
   
-  // Mood-based speed decisions with more variety
   let newSpeed;
   if (rand < mood.sprintChance) {
     newSpeed = 'sprint';
@@ -272,7 +314,6 @@ function randomSpeedChange() {
     newSpeed = 'walk';
   }
   
-  // Only change if it's actually different
   if (newSpeed !== currentSpeed) {
     currentSpeed = newSpeed;
     
@@ -288,21 +329,6 @@ function randomSpeedChange() {
       console.log('[AI] Feeling energetic, time to run!');
     }
   }
-  
-  // Variable duration based on speed and mood
-  const baseDuration = {
-    sprint: 2000 + Math.random() * 4000,
-    crouch: 3000 + Math.random() * 5000,
-    pause: 1000 + Math.random() * 3000,
-    walk: 5000 + Math.random() * 10000
-  };
-  
-  const duration = baseDuration[currentSpeed] || 5000;
-  
-  if (speedChangeTimeout) {
-    clearTimeout(speedChangeTimeout);
-  }
-  speedChangeTimeout = setTimeout(() => randomSpeedChange(), duration);
 }
 
 // Random item holding
@@ -317,99 +343,65 @@ async function randomlyHoldItem() {
   try {
     await bot.equip(randomItem, 'hand');
     console.log(`[AI] Now holding ${randomItem.name}`);
+    lastActivityTime = Date.now();
   } catch (error) {
-    // Silently fail if can't equip
+    // Silently fail
   }
 }
 
-// Enhanced random movements with more variety
+// OPTIMIZED: Simpler random movements with timeout protection
 async function randomMovements() {
   if (!aiReady || isPerformingAction) return;
   
-  const mood = getMoodProfile();
   const actionType = Math.random();
   
   try {
-    if (actionType < 0.25) {
-      // Crouch for varying duration
-      const duration = 1000 + Math.random() * 4000;
-      console.log('[AI] Crouching and looking around...');
+    lastActivityTime = Date.now();
+    
+    if (actionType < 0.3) {
+      // Quick crouch
       bot.setControlState('sneak', true);
+      await sleep(1000 + Math.random() * 2000);
+      bot.setControlState('sneak', false);
       
-      // Look around while crouching
-      setTimeout(async () => {
-        if (bot && bot.entity) {
-          const randomYaw = bot.entity.yaw + (Math.random() - 0.5) * Math.PI;
-          await bot.look(randomYaw, 0, true);
-        }
-      }, duration / 2);
-      
-      setTimeout(() => {
-        if (bot) bot.setControlState('sneak', false);
-      }, duration);
-      
-    } else if (actionType < 0.45) {
-      // Jump varying amounts
-      const jumps = 1 + Math.floor(Math.random() * 5);
-      const jumpStyle = Math.random();
-      
-      if (jumpStyle < 0.5) {
-        // Quick successive jumps
-        console.log(`[AI] Jumping excitedly ${jumps} times`);
-        for (let i = 0; i < jumps; i++) {
-          bot.setControlState('jump', true);
-          await new Promise(resolve => setTimeout(resolve, 100));
-          bot.setControlState('jump', false);
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-      } else {
-        // Spaced out jumps
-        console.log(`[AI] Bouncing around playfully`);
-        for (let i = 0; i < jumps; i++) {
-          bot.setControlState('jump', true);
-          await new Promise(resolve => setTimeout(resolve, 100));
-          bot.setControlState('jump', false);
-          await new Promise(resolve => setTimeout(resolve, 600 + Math.random() * 400));
-        }
+    } else if (actionType < 0.5) {
+      // Jump
+      const jumps = 1 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < jumps; i++) {
+        bot.setControlState('jump', true);
+        await sleep(100);
+        bot.setControlState('jump', false);
+        await sleep(300);
       }
       
-    } else if (actionType < 0.65) {
-      // Spin around
-      console.log('[AI] Spinning around');
+    } else if (actionType < 0.7) {
+      // Look around
       if (bot && bot.entity) {
         const startYaw = bot.entity.yaw;
-        const spinSteps = 8;
-        for (let i = 0; i < spinSteps; i++) {
-          await bot.look(startYaw + (Math.PI * 2 * i / spinSteps), 0, true);
-          await new Promise(resolve => setTimeout(resolve, 100));
+        for (let i = 0; i < 4; i++) {
+          await bot.look(startYaw + (Math.PI * i / 2), 0, true);
+          await sleep(200);
         }
-      }
-      
-    } else if (actionType < 0.80) {
-      // Look up and down (like observing)
-      console.log('[AI] Observing surroundings');
-      if (bot && bot.entity) {
-        await bot.look(bot.entity.yaw, -Math.PI / 4, true); // Look up
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await bot.look(bot.entity.yaw, Math.PI / 6, true); // Look down
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await bot.look(bot.entity.yaw, 0, true); // Look straight
       }
       
     } else {
-      // Crouch-jump combo
-      console.log('[AI] Performing crouch-jump');
-      bot.setControlState('sneak', true);
-      await new Promise(resolve => setTimeout(resolve, 300));
-      bot.setControlState('jump', true);
-      await new Promise(resolve => setTimeout(resolve, 100));
-      bot.setControlState('jump', false);
-      await new Promise(resolve => setTimeout(resolve, 200));
-      bot.setControlState('sneak', false);
+      // Look up/down
+      if (bot && bot.entity) {
+        await bot.look(bot.entity.yaw, -Math.PI / 4, true);
+        await sleep(400);
+        await bot.look(bot.entity.yaw, Math.PI / 6, true);
+        await sleep(400);
+        await bot.look(bot.entity.yaw, 0, true);
+      }
     }
   } catch (error) {
     // Silently handle errors
   }
+}
+
+// Helper sleep function
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // Scan for interactable objects
@@ -441,11 +433,13 @@ function scanForInteractables() {
   return interactables.length > 0 ? interactables : null;
 }
 
+// OPTIMIZED: Interaction with timeout protection
 async function interactWithObject(block) {
   if (!block || !bot || !bot.pathfinder) return;
   
   console.log(`[AI] Interacting with ${block.name}`);
   isPerformingAction = true;
+  actionStartTime = Date.now();
   isMoving = false;
   
   try {
@@ -458,31 +452,33 @@ async function interactWithObject(block) {
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.setGoal(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
     
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await sleep(3000);
     bot.pathfinder.setGoal(null);
     
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
-    await new Promise(resolve => setTimeout(resolve, 400));
+    await sleep(400);
     
     if (block.name.includes('door')) {
       await bot.activateBlock(block);
-      await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
+      await sleep(1000 + Math.random() * 1000);
       const doorBlock = bot.blockAt(block.position);
       if (doorBlock) await bot.activateBlock(doorBlock);
     } else if (block.name === 'chest') {
       const window = await bot.openContainer(block);
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await sleep(500);
       bot.closeWindow(window);
     } else {
       await bot.activateBlock(block);
     }
     
     console.log('[AI] Interaction complete');
+    lastActivityTime = Date.now();
   } catch (error) {
     console.log('[AI] Interaction failed:', error.message);
   } finally {
     isPerformingAction = false;
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    actionStartTime = 0;
+    await sleep(500);
   }
 }
 
@@ -533,12 +529,13 @@ function getNearestPlayer(players) {
 
 async function followPlayer(player) {
   if (!player || !player.position) return;
-  if (!bot || !bot.pathfinder) return; // Safety check
+  if (!bot || !bot.pathfinder) return;
   
   console.log(`[AI] Following ${player.username} for 30 seconds`);
   isFollowingPlayer = true;
   followingPlayer = player;
   isMoving = false;
+  lastActivityTime = Date.now();
   
   try {
     const followDistance = 2 + Math.random();
@@ -567,7 +564,7 @@ function stopFollowing() {
       try {
         bot.pathfinder.setGoal(null);
       } catch (e) {
-        // Ignore pathfinder errors
+        // Ignore
       }
     }
     isFollowingPlayer = false;
@@ -590,10 +587,9 @@ async function checkForPlayers() {
   }
 }
 
-// Enhanced hunger and eating management
+// Food management
 const foodChestLocation = new Vec3(2319, 77, 2975);
 
-// Find any edible food in inventory
 function findFoodInInventory() {
   const items = bot.inventory.items();
   const foodItems = [
@@ -604,7 +600,6 @@ function findFoodInInventory() {
     'melon_slice', 'sweet_berries', 'golden_apple', 'golden_carrot'
   ];
   
-  // Prefer cooked food over raw
   for (const foodName of foodItems) {
     const food = items.find(item => item.name === foodName);
     if (food) return food;
@@ -624,6 +619,7 @@ async function goToChestAndGetSteak() {
   console.log('[AI] No steak in inventory, going to chest to get food');
   isGettingFood = true;
   isPerformingAction = true;
+  actionStartTime = Date.now();
   
   try {
     bot.pathfinder.setGoal(null);
@@ -636,23 +632,21 @@ async function goToChestAndGetSteak() {
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.setGoal(new goals.GoalNear(foodChestLocation.x, foodChestLocation.y, foodChestLocation.z, 2));
     
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await sleep(5000);
     bot.pathfinder.setGoal(null);
     
     const chestBlock = bot.blockAt(foodChestLocation);
     if (!chestBlock || chestBlock.name !== 'chest') {
       console.log('[AI] Could not find chest at expected location');
-      isGettingFood = false;
-      isPerformingAction = false;
       return;
     }
     
     console.log('[AI] Opening chest to get steak');
     await bot.lookAt(chestBlock.position.offset(0.5, 0.5, 0.5));
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await sleep(300);
     
     const window = await bot.openContainer(chestBlock);
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await sleep(500);
     
     const steakInChest = window.containerItems().find(item => 
       item.name === 'cooked_beef' || item.name === 'beef'
@@ -661,19 +655,21 @@ async function goToChestAndGetSteak() {
     if (steakInChest) {
       console.log(`[AI] Found ${steakInChest.name} in chest, taking it`);
       await window.withdraw(steakInChest.type, null, steakInChest.count);
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await sleep(300);
     } else {
       console.log('[AI] No steak found in chest');
     }
     
     bot.closeWindow(window);
     console.log('[AI] Closed chest');
+    lastActivityTime = Date.now();
     
   } catch (error) {
     console.log('[AI] Failed to get food from chest:', error.message);
   } finally {
     isGettingFood = false;
     isPerformingAction = false;
+    actionStartTime = 0;
   }
 }
 
@@ -684,10 +680,10 @@ async function checkHungerAndEat() {
   const currentHunger = bot.food || 20;
   const hungerThreshold = mood.hungerThreshold;
   
-  // Proactive eating - eat before getting too hungry based on mood
   if (currentHunger < hungerThreshold) {
     console.log(`[AI] Hunger at ${currentHunger}/20 (threshold: ${hungerThreshold}), time to eat`);
     isPerformingAction = true;
+    actionStartTime = Date.now();
     
     try {
       let foodItem = findFoodInInventory();
@@ -695,193 +691,177 @@ async function checkHungerAndEat() {
       if (!foodItem) {
         console.log('[AI] No food in inventory, heading to food chest');
         isPerformingAction = false;
+        actionStartTime = 0;
         await goToChestAndGetSteak();
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await sleep(1000);
         foodItem = findFoodInInventory();
         isPerformingAction = true;
+        actionStartTime = Date.now();
       }
       
       if (foodItem) {
         console.log(`[AI] Found ${foodItem.name} in inventory, preparing to eat`);
         
         await bot.equip(foodItem, 'hand');
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await sleep(500);
         
         console.log(`[AI] Eating ${foodItem.name}... nom nom nom`);
         bot.activateItem();
         
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await sleep(2000);
         
         const newHunger = bot.food || 20;
         console.log(`[AI] Finished eating! Hunger: ${currentHunger} -> ${newHunger}/20`);
+        lastActivityTime = Date.now();
         
-        // Eat more if still hungry
-        if (newHunger < hungerThreshold - 2) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          await checkHungerAndEat();
-        }
       } else {
-        console.log('[AI] Still no food available after checking chest - will try again soon');
+        console.log('[AI] Still no food available after checking chest');
       }
     } catch (error) {
       console.log('[AI] Failed to eat:', error.message);
     } finally {
       isPerformingAction = false;
+      actionStartTime = 0;
     }
   }
 }
 
-// Clear all AI intervals and timeouts
-function clearAIIntervals() {
-  aiIntervals.forEach(intervalId => clearInterval(intervalId));
-  aiIntervals = [];
-  aiStarted = false;
-  
-  if (speedChangeTimeout) {
-    clearTimeout(speedChangeTimeout);
-    speedChangeTimeout = null;
+// OPTIMIZED: Clear all AI-related intervals
+function clearAllIntervals() {
+  if (mainAIInterval) {
+    clearInterval(mainAIInterval);
+    mainAIInterval = null;
   }
-  
   if (moodChangeTimeout) {
     clearTimeout(moodChangeTimeout);
     moodChangeTimeout = null;
   }
-}
-
-// Dynamic decision maker - constantly varying intervals
-function createDynamicInterval(action, baseMin, baseMax, chanceFunc) {
-  function scheduleNext() {
-    if (!aiReady || !aiStarted) return;
-    
-    const mood = getMoodProfile();
-    const shouldAct = chanceFunc ? shouldDoAction(chanceFunc(mood)) : true;
-    
-    if (shouldAct) {
-      action();
-    }
-    
-    // Highly variable timing - never the same twice
-    const nextDelay = baseMin + Math.random() * (baseMax - baseMin);
-    const timeoutId = setTimeout(scheduleNext, nextDelay);
-    aiIntervals.push(timeoutId);
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
   }
-  
-  scheduleNext();
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
 }
 
-// Enhanced Main AI Loop with dynamic decision making
+// OPTIMIZED: Single unified AI loop instead of multiple intervals
 function startAI() {
-  if (aiStarted) {
+  if (mainAIInterval) {
     console.log('[AI] AI loop already running, skipping duplicate start');
     return;
   }
   
-  aiStarted = true;
-  console.log('[AI] Starting enhanced AI decision system...');
+  console.log('[AI] Starting optimized AI decision system...');
   
-  // Initialize mood system
   changeMood();
   randomSpeedChange();
   
-  // Hunger check - most critical, check frequently (2-5 seconds)
-  createDynamicInterval(() => {
-    if (aiReady) checkHungerAndEat();
-  }, 2000, 5000);
-  
-  // Environment interaction - varies by mood (5-15 seconds)
-  createDynamicInterval(() => {
-    if (aiReady && !isPerformingAction && !isFollowingPlayer) {
-      const mood = getMoodProfile();
-      if (shouldDoAction(mood.interactChance)) {
-        checkEnvironment();
-      }
+  // Single main loop that handles all decisions - much more efficient
+  mainAIInterval = setInterval(() => {
+    if (!aiReady || !connected) return;
+    
+    // Make a decision each tick
+    const decision = Math.random();
+    
+    // Priority 1: Check hunger (20% chance each tick)
+    if (decision < 0.2 && !isPerformingAction && !isGettingFood) {
+      checkHungerAndEat();
     }
-  }, 5000, 15000);
-  
-  // Player detection - varies by mood (3-10 seconds)
-  createDynamicInterval(() => {
-    if (aiReady && !isPerformingAction && !isFollowingPlayer) {
-      const mood = getMoodProfile();
-      if (shouldDoAction(mood.followChance)) {
-        checkForPlayers();
-      }
-    }
-  }, 3000, 10000);
-  
-  // Random movements - highly variable (4-20 seconds)
-  createDynamicInterval(() => {
-    if (aiReady && !isPerformingAction) {
-      if (shouldDoAction(0.5)) {
-        randomMovements();
-      }
-    }
-  }, 4000, 20000);
-  
-  // Item holding - occasional and unpredictable (8-30 seconds)
-  createDynamicInterval(() => {
-    if (aiReady && !isPerformingAction && !isGettingFood) {
-      if (shouldDoAction(0.4)) {
-        randomlyHoldItem();
-      }
-    }
-  }, 8000, 30000);
-  
-  // Wandering - most common activity (2-8 seconds)
-  createDynamicInterval(() => {
-    if (aiReady && !isMoving && !isPerformingAction && !isFollowingPlayer) {
+    // Priority 2: Wandering (30% chance if not busy)
+    else if (decision < 0.5 && !isMoving && !isPerformingAction && !isFollowingPlayer) {
       const mood = getMoodProfile();
       if (shouldDoAction(mood.exploreChance)) {
         startWandering();
       }
     }
-  }, 2000, 8000);
+    // Priority 3: Random movements (15% chance)
+    else if (decision < 0.65 && !isPerformingAction) {
+      if (shouldDoAction(0.5)) {
+        randomMovements();
+      }
+    }
+    // Priority 4: Check for players (10% chance)
+    else if (decision < 0.75 && !isPerformingAction && !isFollowingPlayer) {
+      const mood = getMoodProfile();
+      if (shouldDoAction(mood.followChance)) {
+        checkForPlayers();
+      }
+    }
+    // Priority 5: Environment interaction (10% chance)
+    else if (decision < 0.85 && !isPerformingAction && !isFollowingPlayer) {
+      const mood = getMoodProfile();
+      if (shouldDoAction(mood.interactChance * 0.5)) {
+        checkEnvironment();
+      }
+    }
+    // Priority 6: Random item holding (5% chance)
+    else if (decision < 0.9 && !isPerformingAction && !isGettingFood) {
+      if (shouldDoAction(0.3)) {
+        randomlyHoldItem();
+      }
+    }
+    // Priority 7: Speed change (10% chance)
+    else {
+      if (shouldDoAction(0.3)) {
+        randomSpeedChange();
+      }
+    }
+  }, 2000); // Run every 2 seconds
   
   // Start initial wander
   setTimeout(() => {
     if (aiReady) startWandering();
   }, 2000);
   
-  console.log('[AI] Enhanced AI system active - behavior patterns will vary dynamically');
+  console.log('[AI] Optimized AI system active - single loop, no memory leaks');
 }
 
-// Graceful shutdown
+// Graceful shutdown handlers
 process.on('SIGINT', () => {
   console.log('[Bot] Shutting down gracefully...');
+  clearAllIntervals();
   if (bot && typeof bot.quit === 'function') {
-    try {
-      bot.quit();
-    } catch (e) {
-      console.log('[Bot] Error during quit:', e.message);
-    }
+    try { bot.quit(); } catch (e) {}
   }
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log('[Bot] Shutting down gracefully...');
+  clearAllIntervals();
   if (bot && typeof bot.quit === 'function') {
-    try {
-      bot.quit();
-    } catch (e) {
-      console.log('[Bot] Error during quit:', e.message);
-    }
+    try { bot.quit(); } catch (e) {}
   }
   process.exit(0);
 });
 
+// Handle uncaught exceptions to prevent crashes
+process.on('uncaughtException', (err) => {
+  console.error('[Bot] Uncaught exception:', err.message);
+  // Don't exit, try to recover
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Bot] Unhandled rejection:', reason);
+  // Don't exit, try to recover
+});
+
 function setupEventHandlers() {
   bot.on('login', function(){
-    console.log("Logged In")
+    console.log("Logged In");
   });
 
   bot.on('spawn', function() {
     console.log("Bot spawned!");
     connected = true;
     aiReady = false;
-    reconnectAttempts = 0; // Reset reconnection counter on successful spawn
-    isReconnecting = false; // Reset reconnection flag
+    reconnectAttempts = 0; // Reset on successful spawn
+    isReconnecting = false;
+    lastActivityTime = Date.now();
+    lastConnectTime = Date.now(); // Track successful connection time
     
-    // Clear any pending reconnection timeouts
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
       reconnectTimeout = null;
@@ -893,12 +873,12 @@ function setupEventHandlers() {
         console.log(`\n${"=".repeat(50)}`);
         console.log(`M3GAN AI System Initializing...`);
         console.log(`Spawn: X=${spawnPoint.x.toFixed(1)}, Y=${spawnPoint.y.toFixed(1)}, Z=${spawnPoint.z.toFixed(1)}`);
-        console.log(`Connection: STABLE | Reconnect attempts: 0`);
+        console.log(`Connection: STABLE | Mode: OPTIMIZED`);
         console.log("=".repeat(50));
         
         setTimeout(() => {
           aiReady = true;
-          console.log("[AI] M3GAN is now active and ready for 24/7 operation\n");
+          console.log("[AI] M3GAN is now active and optimized for 24/7 operation\n");
           startAI();
         }, 3000);
       }
@@ -909,6 +889,7 @@ function setupEventHandlers() {
     if (isFollowingPlayer) return;
     console.log('[Move] Reached destination');
     isMoving = false;
+    lastActivityTime = Date.now();
   });
 
   bot.on('path_update', function(results) {
@@ -926,30 +907,45 @@ function setupEventHandlers() {
     isMoving = false;
     isPerformingAction = false;
     isFollowingPlayer = false;
+    actionStartTime = 0;
     
-    // Clear all AI intervals to prevent duplicates on reconnect
-    clearAIIntervals();
-    
-    // Clear keep-alive interval
-    if (keepAliveInterval) {
-      clearInterval(keepAliveInterval);
-      keepAliveInterval = null;
+    // Clear main AI interval
+    if (mainAIInterval) {
+      clearInterval(mainAIInterval);
+      mainAIInterval = null;
+    }
+    if (moodChangeTimeout) {
+      clearTimeout(moodChangeTimeout);
+      moodChangeTimeout = null;
     }
     
-    // Prevent duplicate reconnection attempts
     if (isReconnecting) {
       console.log('[Bot] Reconnection already in progress, skipping...');
       return;
     }
     
+    // Check if we need to wait before reconnecting (prevent rapid leave/rejoin)
+    const now = Date.now();
+    const timeSinceLastConnect = now - lastConnectTime;
+    
+    if (timeSinceLastConnect < MIN_CONNECTION_INTERVAL) {
+      const waitTime = MIN_CONNECTION_INTERVAL - timeSinceLastConnect;
+      console.log(`[Bot] Waiting ${Math.ceil(waitTime/1000)}s before reconnecting (cooldown)...`);
+    }
+    
     isReconnecting = true;
-    
-    // Auto-reconnect with exponential backoff
     reconnectAttempts++;
-    const delay = Math.min(initialReconnectDelay * Math.pow(2, Math.min(reconnectAttempts - 1, 4)), maxReconnectDelay);
-    console.log(`[Bot] Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})...`);
     
-    // Clear any existing reconnect timeout
+    // Calculate delay - start at 30s, max 5 minutes
+    let delay = Math.min(initialReconnectDelay * Math.pow(1.5, Math.min(reconnectAttempts - 1, 6)), maxReconnectDelay);
+    
+    // Ensure minimum interval between connections
+    if (timeSinceLastConnect < MIN_CONNECTION_INTERVAL) {
+      delay = Math.max(delay, MIN_CONNECTION_INTERVAL - timeSinceLastConnect);
+    }
+    
+    console.log(`[Bot] Reconnecting in ${Math.ceil(delay/1000)}s (attempt ${reconnectAttempts})...`);
+    
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
     }
@@ -959,21 +955,22 @@ function setupEventHandlers() {
     function attemptReconnection() {
       try {
         console.log('[Bot] Attempting to reconnect...');
+        lastConnectTime = Date.now();
         const newBot = createBot();
         if (newBot) {
           bot = newBot;
           setupEventHandlers();
           isReconnecting = false;
         } else {
-          console.log('[Bot] Failed to create bot, will retry in 5 seconds...');
+          console.log('[Bot] Failed to create bot, will retry in 60 seconds...');
           isReconnecting = false;
-          reconnectTimeout = setTimeout(attemptReconnection, 5000);
+          reconnectTimeout = setTimeout(attemptReconnection, 60000);
         }
       } catch (error) {
         console.error('[Bot] Reconnection error:', error.message);
         isReconnecting = false;
-        console.log('[Bot] Will retry in 5 seconds...');
-        reconnectTimeout = setTimeout(attemptReconnection, 5000);
+        console.log('[Bot] Will retry in 60 seconds...');
+        reconnectTimeout = setTimeout(attemptReconnection, 60000);
       }
     }
   });
@@ -993,33 +990,32 @@ function setupEventHandlers() {
       syscall: err.syscall || 'N/A'
     });
     
-    // Handle connection errors (ECONNRESET, ECONNREFUSED, etc.)
     const connectionErrors = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'];
     if (connectionErrors.includes(err.code)) {
       console.log(`[Bot] Connection error detected (${err.code}). Server may be offline or unreachable.`);
       
-      // Don't manually handle disconnection - let the 'end' event handle it
-      // Just update the state
       if (connected) {
         connected = false;
         aiReady = false;
         isMoving = false;
         isPerformingAction = false;
         isFollowingPlayer = false;
-        clearAIIntervals();
+        actionStartTime = 0;
+        
+        if (mainAIInterval) {
+          clearInterval(mainAIInterval);
+          mainAIInterval = null;
+        }
       }
       
-      // The 'end' event will trigger automatically and handle reconnection
       console.log(`[Bot] Waiting for 'end' event to trigger reconnection...`);
     }
   });
   
-  // Add health check
   bot.on('health', function() {
-    // Bot is alive and responding
+    lastActivityTime = Date.now();
   });
   
-  // Monitor connection state
   bot.on('disconnect', function(packet) {
     console.log('[Bot] Received disconnect packet:', packet.reason);
   });
